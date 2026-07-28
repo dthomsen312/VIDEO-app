@@ -1,6 +1,6 @@
 import Photos
 
-/// Copies finished clips into the Photos library, filed under a "VIDEO" album.
+/// Copies finished clips into the Photos library, filed under a "CLIPS" album.
 ///
 /// The app only ever asks for add-only access — it never needs to read the
 /// user's existing photos.
@@ -8,14 +8,16 @@ actor PhotoLibrarySaver {
 
     static let shared = PhotoLibrarySaver()
 
-    static let albumName = "VIDEO"
+    /// The Photos album clips are filed under. The UI reads this rather than
+    /// hardcoding the name, so renaming the album is a one-line change.
+    static let albumName = "CLIPS"
 
     enum SaveError: LocalizedError {
         case noAlbum
 
         var errorDescription: String? {
             switch self {
-            case .noAlbum: return "Couldn't create the VIDEO album in Photos."
+            case .noAlbum: return "Couldn't create the \(PhotoLibrarySaver.albumName) album in Photos."
             }
         }
     }

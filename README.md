@@ -40,9 +40,10 @@ won't overheat and keep it plugged in for long sessions.
 
 ## Where the clips go
 
-Each clip lands in your **Photos library**, in an album called **VIDEO**. They
+Each clip lands in your **Photos library**, in an album called **CLIPS**. They
 show up in the camera roll like anything else you shoot, back up with iCloud
-Photos, and survive deleting the app.
+Photos, and survive deleting the app. The album is created automatically the
+first time a clip is saved — you don't need to make it yourself.
 
 Under the hood a clip is first written to `Documents/Recordings` with a
 timestamped name, then copied into Photos:
@@ -96,6 +97,6 @@ HandsFreeRecorder/
   CameraPreview.swift          AVCaptureVideoPreviewLayer wrapped for SwiftUI
   RecordingController.swift    Capture session + the repeating clip schedule
   ClipStorage.swift            Folder location, timestamped filenames, free space
-  PhotoLibrarySaver.swift      Copies finished clips into the Photos VIDEO album
+  PhotoLibrarySaver.swift      Copies finished clips into the Photos CLIPS album
   Assets.xcassets/             App icon and accent color
 ```

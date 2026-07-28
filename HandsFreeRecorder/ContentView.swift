@@ -134,7 +134,7 @@ struct ContentView: View {
 
     private var destinationText: String {
         controller.photosAccessGranted
-            ? "Saving to Photos › VIDEO album"
+            ? "Saving to Photos › \(PhotoLibrarySaver.albumName) album"
             : "Saving to Files › On My iPhone › VIDEO"
     }
 
