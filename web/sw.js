@@ -1,6 +1,9 @@
 // Caches the app shell so VIDEO opens and records with no network at all.
-// Bump CACHE when the app changes to retire the old copy.
-const CACHE = 'video-v2';
+//
+// CACHE must be bumped on every release. If it isn't, this file's bytes don't
+// change, the browser never treats the worker as updated, and installed phones
+// keep serving whatever is already cached — including a bad build.
+const CACHE = 'video-v3';
 
 const SHELL = [
   './',
@@ -27,21 +30,41 @@ self.addEventListener('activate', event => {
 });
 
 self.addEventListener('fetch', event => {
-  if (event.request.method !== 'GET') return;
+  const request = event.request;
+  if (request.method !== 'GET') return;
 
-  event.respondWith(
-    caches.match(event.request).then(hit => {
-      if (hit) return hit;
-      return fetch(event.request)
+  const isPage = request.mode === 'navigate' || request.destination === 'document';
+
+  if (isPage) {
+    // Network-first for the app itself. Cache-first here is what let a bad
+    // build survive on installed phones: the worker kept answering from its
+    // own cache and never looked at the server again. Now a working network
+    // always wins, and the cache is only the offline fallback.
+    event.respondWith(
+      fetch(request)
         .then(response => {
-          // Stash same-origin successes so a first online visit primes the cache.
-          if (response.ok && new URL(event.request.url).origin === self.location.origin) {
+          if (response && response.ok) {
             const copy = response.clone();
-            caches.open(CACHE).then(cache => cache.put(event.request, copy));
+            caches.open(CACHE).then(cache => cache.put(request, copy));
           }
           return response;
         })
-        .catch(() => caches.match('./index.html'));
+        .catch(() => caches.match(request).then(hit => hit || caches.match('./index.html')))
+    );
+    return;
+  }
+
+  // Icons and the manifest are static, so cache-first is fine for them.
+  event.respondWith(
+    caches.match(request).then(hit => {
+      if (hit) return hit;
+      return fetch(request).then(response => {
+        if (response && response.ok && new URL(request.url).origin === self.location.origin) {
+          const copy = response.clone();
+          caches.open(CACHE).then(cache => cache.put(request, copy));
+        }
+        return response;
+      });
     })
   );
 });
