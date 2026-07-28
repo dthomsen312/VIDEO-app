@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>VIDEO</title>
+
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="VIDEO">
+<meta name="theme-color" content="#0c0c0f">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #000; color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Rounded", system-ui, sans-serif;
+    -webkit-user-select: none; user-select: none;
+  }
+
+  #preview {
+    position: fixed; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: cover; background: #000;
+  }
+
+  #recFrame {
+    position: fixed; inset: 0;
+    border: 10px solid #ff3b30;
+    pointer-events: none; opacity: 0;
+    transition: opacity .15s;
+  }
+  #recFrame.on { opacity: 1; }
+
+  .ui {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column; align-items: center;
+    padding: calc(env(safe-area-inset-top) + 10px) 16px
+             calc(env(safe-area-inset-bottom) + 10px);
+    pointer-events: none;
+  }
+  .ui > * { pointer-events: auto; }
+
+  .status {
+    display: flex; align-items: center; gap: 10px; align-self: flex-start;
+    background: rgba(0,0,0,.55); border-radius: 999px;
+    padding: 11px 18px; font-size: 20px; font-weight: 700;
+  }
+  .dot { width: 16px; height: 16px; border-radius: 50%; background: #888; }
+  .dot.ready { background: #fff; }
+  .dot.waiting { background: #ffd60a; }
+  .dot.rec { background: #ff3b30; }
+
+  .spacer { flex: 1; }
+
+  .dial {
+    background: rgba(0,0,0,.5); border-radius: 28px;
+    padding: 16px 30px; text-align: center;
+  }
+  .dial b {
+    display: block; font-size: 88px; line-height: 1; font-weight: 800;
+    font-variant-numeric: tabular-nums;
+  }
+  .dial.rec b { color: #ff3b30; }
+  .dial span { font-size: 17px; font-weight: 600; opacity: .85; }
+
+  .tally {
+    background: rgba(0,0,0,.5); border-radius: 18px;
+    padding: 10px 16px; margin-bottom: 12px; width: 100%;
+    text-align: center; font-size: 17px; font-weight: 600;
+  }
+  .tally em { display: block; font-style: normal; font-size: 13px; opacity: .7; margin-top: 3px; }
+
+  .controls { display: flex; gap: 14px; width: 100%; }
+  .big {
+    flex: 1; height: 140px; border: 0; border-radius: 26px;
+    color: #fff; font-size: 30px; font-weight: 800; letter-spacing: .5px;
+    font-family: inherit;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+  }
+  .big svg { width: 44px; height: 44px; fill: currentColor; }
+  .big.start { background: #30d158; }
+  .big.stop  { background: #ff3b30; }
+  .big:disabled { opacity: .25; }
+
+  .overlay {
+    position: fixed; inset: 0; z-index: 10;
+    background: rgba(0,0,0,.88);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 28px; text-align: center; gap: 14px;
+  }
+  .overlay[hidden] { display: none; }
+  .overlay h2 { margin: 0; font-size: 26px; }
+  .overlay p { margin: 0; font-size: 16px; line-height: 1.45; opacity: .85; max-width: 30em; }
+  .overlay button {
+    border: 0; border-radius: 20px; padding: 20px 28px; width: 100%; max-width: 360px;
+    font-size: 22px; font-weight: 800; color: #fff; background: #0a84ff; font-family: inherit;
+  }
+  .overlay button.ghost { background: transparent; color: #9b9ba1; font-size: 17px; padding: 12px; }
+  .warn { color: #ffd60a; font-size: 15px; }
+</style>
+</head>
+<body>
+
+<video id="preview" playsinline autoplay muted></video>
+<div id="recFrame"></div>
+
+<div class="ui">
+  <div class="status"><span id="dot" class="dot"></span><span id="statusText">Starting camera…</span></div>
+  <div class="spacer"></div>
+  <div class="dial" id="dial"><b id="dialNum">--</b><span id="dialCap">10s clip every 2 min</span></div>
+  <div class="spacer"></div>
+  <div class="tally"><span id="tallyMain">No clips yet</span><em id="tallySub">Clips stay here until you save them</em></div>
+  <div class="controls">
+    <button class="big start" id="startBtn" disabled>
+      <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>START
+    </button>
+    <button class="big stop" id="stopBtn" disabled>
+      <svg viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></svg>STOP
+    </button>
+  </div>
+</div>
+
+<div class="overlay" id="gate">
+  <h2>VIDEO</h2>
+  <p id="gateText">This app needs your camera and microphone to record clips.</p>
+  <button id="gateBtn">ENABLE CAMERA</button>
+</div>
+
+<div class="overlay" id="sheet" hidden>
+  <h2>Session finished</h2>
+  <p id="sheetSummary"></p>
+  <button id="saveBtn">SAVE TO PHOTOS</button>
+  <p>Choose <b>Save Videos</b> in the share sheet. They land in Photos under Recents.</p>
+  <button class="ghost" id="laterBtn">Keep recording instead</button>
+</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const CLIP_MS  = 10000;   // length of each clip
+  const CYCLE_MS = 120000;  // start-of-clip to start-of-clip
+
+  const $ = id => document.getElementById(id);
+  const preview = $('preview'), recFrame = $('recFrame'), dial = $('dial');
+  const dot = $('dot'), statusText = $('statusText');
+  const dialNum = $('dialNum'), dialCap = $('dialCap');
+  const tallyMain = $('tallyMain'), tallySub = $('tallySub');
+  const startBtn = $('startBtn'), stopBtn = $('stopBtn');
+  const gate = $('gate'), gateText = $('gateText'), gateBtn = $('gateBtn');
+  const sheet = $('sheet'), sheetSummary = $('sheetSummary');
+  const saveBtn = $('saveBtn'), laterBtn = $('laterBtn');
+
+  let stream = null, mime = '', recorder = null, chunks = [];
+  let clips = [], totalBytes = 0;
+  let state = 'idle';          // idle | waiting | recording
+  let anchor = 0, nextIndex = 0, clipEnd = 0, clipStartedAt = 0;
+  let ticker = null, clipTimer = null, wakeLock = null;
+
+  // Safari records MP4; other browsers fall back to WebM. Pick whatever the
+  // engine will actually accept rather than assuming.
+  function pickMime() {
+    const options = [
+      'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
+      'video/mp4',
+      'video/webm;codecs=vp8,opus',
+      'video/webm'
+    ];
+    if (typeof MediaRecorder === 'undefined') return null;
+    const found = options.find(t => MediaRecorder.isTypeSupported(t));
+    return found === undefined ? '' : found;
+  }
+
+  async function enableCamera() {
+    if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      gateText.textContent = 'This browser can’t record video. Open the app in Safari on iOS 15 or later.';
+      gateBtn.hidden = true;
+      return;
+    }
+
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: true
+      });
+    } catch (err) {
+      // Retry without audio — a denied mic shouldn't block video entirely.
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' } }, audio: false
+        });
+      } catch (err2) {
+        gateText.textContent = 'Camera access was denied. Allow it in Settings › Safari › Camera, then reopen VIDEO.';
+        gateBtn.textContent = 'TRY AGAIN';
+        return;
+      }
+    }
+
+    mime = pickMime();
+    preview.srcObject = stream;
+    preview.play().catch(() => {});
+    gate.hidden = true;
+    startBtn.disabled = false;
+    setStatus('ready', 'Ready');
+  }
+
+  function start() {
+    if (state !== 'idle' || !stream) return;
+    sheet.hidden = true;
+    anchor = Date.now();
+    nextIndex = 0;
+    state = 'waiting';
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    keepAwake();
+    ticker = setInterval(tick, 200);
+    tick();  // clip 1 is due immediately
+  }
+
+  function stop(note) {
+    if (state === 'idle') return;
+    state = 'idle';
+    clearInterval(ticker); ticker = null;
+    clearTimeout(clipTimer); clipTimer = null;
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+    releaseWake();
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+    recFrame.classList.remove('on');
+    dial.classList.remove('rec');
+    dialNum.textContent = '--';
+    setStatus('ready', note || 'Ready');
+    // Let the last clip's onstop land before totting up.
+    setTimeout(showSheet, 350);
+  }
+
+  function tick() {
+    const now = Date.now();
+    if (state === 'recording') {
+      setDial(Math.ceil((clipEnd - now) / 1000), 'seconds left in clip');
+    } else if (state === 'waiting') {
+      const due = anchor + nextIndex * CYCLE_MS;
+      if (now >= due) beginClip();
+      else setDial(Math.ceil((due - now) / 1000), 'until next clip');
+    }
+  }
+
+  function beginClip() {
+    if (state !== 'waiting') return;
+    chunks = [];
+    try {
+      recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+    } catch (err) {
+      stop('Recorder failed');
+      gate.hidden = false;
+      gateText.textContent = 'This browser refused to start a recording: ' + err.message;
+      return;
+    }
+
+    recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    recorder.onstop = clipStopped;
+    recorder.start();
+
+    state = 'recording';
+    clipStartedAt = Date.now();
+    clipEnd = clipStartedAt + CLIP_MS;
+    nextIndex++;
+    setStatus('rec', 'Recording');
+    recFrame.classList.add('on');
+    dial.classList.add('rec');
+    setDial(CLIP_MS / 1000, 'seconds left in clip');
+
+    clipTimer = setTimeout(() => {
+      if (recorder && recorder.state === 'recording') recorder.stop();
+    }, CLIP_MS);
+  }
+
+  function clipStopped() {
+    const type = mime || 'video/mp4';
+    const blob = new Blob(chunks, { type });
+    chunks = [];
+
+    if (blob.size) {
+      const ext = type.indexOf('mp4') !== -1 ? 'mp4' : 'webm';
+      clips.push(new File([blob], 'Clip_' + stamp(clipStartedAt) + '.' + ext, { type }));
+      totalBytes += blob.size;
+      renderTally();
+    }
+
+    recFrame.classList.remove('on');
+    dial.classList.remove('rec');
+
+    // If STOP was pressed mid-clip we're already idle — leave it that way.
+    if (state !== 'recording') return;
+    state = 'waiting';
+    setStatus('waiting', 'Waiting');
+    tick();
+  }
+
+  function showSheet() {
+    if (!clips.length) return;
+    sheetSummary.textContent =
+      clips.length + ' clip' + (clips.length === 1 ? '' : 's') + ' · ' + mb(totalBytes) + ' MB ready to save';
+    sheet.hidden = false;
+  }
+
+  // navigator.share must be called straight from the tap — no awaits before it,
+  // or iOS drops the user-gesture and refuses.
+  saveBtn.addEventListener('click', () => {
+    if (!clips.length) return;
+    if (navigator.canShare && navigator.canShare({ files: clips })) {
+      navigator.share({ files: clips })
+        .then(() => { clips = []; totalBytes = 0; renderTally(); sheet.hidden = true; })
+        .catch(() => {});   // user cancelled the share sheet
+    } else {
+      downloadAll();
+    }
+  });
+
+  laterBtn.addEventListener('click', () => { sheet.hidden = true; });
+
+  function downloadAll() {
+    clips.forEach((file, i) => setTimeout(() => {
+      const url = URL.createObjectURL(file);
+      const a = document.createElement('a');
+      a.href = url; a.download = file.name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }, i * 900));
+  }
+
+  async function keepAwake() {
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { /* unsupported */ }
+  }
+  function releaseWake() {
+    try { if (wakeLock) wakeLock.release(); } catch (e) {}
+    wakeLock = null;
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && state !== 'idle') {
+      stop('Stopped — app left the screen');
+    } else if (document.visibilityState === 'visible' && state !== 'idle') {
+      keepAwake();
+    }
+  });
+
+  function setStatus(kind, text) {
+    dot.className = 'dot ' + kind;
+    statusText.textContent = text;
+  }
+
+  function setDial(seconds, caption) {
+    const s = Math.max(0, seconds);
+    const text = s >= 60 ? Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0') : String(s);
+    if (dialNum.textContent !== text) dialNum.textContent = text;
+    if (dialCap.textContent !== caption) dialCap.textContent = caption;
+  }
+
+  function renderTally() {
+    if (!clips.length) {
+      tallyMain.textContent = 'No clips yet';
+      tallySub.textContent = 'Clips stay here until you save them';
+      return;
+    }
+    tallyMain.textContent = clips.length + ' clip' + (clips.length === 1 ? '' : 's') + ' · ' + mb(totalBytes) + ' MB';
+    tallySub.textContent = clips.length >= 40
+      ? 'Getting large — stop and save soon so nothing is lost'
+      : 'Not saved yet — press STOP, then Save to Photos';
+    tallySub.className = clips.length >= 40 ? 'warn' : '';
+  }
+
+  const mb = bytes => Math.round(bytes / 1048576);
+
+  function stamp(ms) {
+    const d = new Date(ms), p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + '_' +
+           p(d.getHours()) + '-' + p(d.getMinutes()) + '-' + p(d.getSeconds());
+  }
+
+  startBtn.addEventListener('click', start);
+  stopBtn.addEventListener('click', () => stop());
+  gateBtn.addEventListener('click', enableCamera);
+
+  dialCap.textContent = (CLIP_MS / 1000) + 's clip every ' + (CYCLE_MS / 60000) + ' min';
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+
+  // Try straight away; the gate stays up if the browser wants a tap first.
+  enableCamera();
+})();
+</script>
+</body>
+</html>
