@@ -7,24 +7,21 @@ is being written and the battery isn't burning through a full-length recording.
 
 You touch the phone twice per session: once to start, once to stop.
 
-## Building it
+## Installing it
 
-Requires a Mac with Xcode 16 or newer, and an iPhone running iOS 17 or newer.
-The camera doesn't work in the Simulator, so run it on a real device.
+**→ [INSTALL.md](INSTALL.md) has click-by-click instructions**, including the
+Xcode setup and what to do when the usual errors come up.
 
-1. Open `HandsFreeRecorder.xcodeproj`.
-2. Select the **VIDEO** target → **Signing & Capabilities** → set **Team** to
-   your own Apple ID. Change the bundle identifier from
-   `com.example.HandsFreeRecorder` to something unique to you.
-3. Pick your iPhone as the run destination and hit ⌘R.
-4. Approve the camera, microphone, and "Add to Photos" prompts on first launch.
+The short version, if you already know Xcode: open
+`HandsFreeRecorder.xcodeproj`, set a signing Team and a unique bundle
+identifier on the **VIDEO** target, pick your iPhone as the destination, ⌘R.
+Needs Xcode 16+, an iPhone on iOS 17+, and a real device — the camera doesn't
+work in the Simulator.
 
-It installs like any other app — a **VIDEO** icon on your home screen that you
-tap to launch. Xcode is only needed to put it there and to refresh the signing;
-you don't need the Mac to use it.
-
-With a free Apple ID the app expires after 7 days and needs a re-install; a paid
-developer account extends that to a year.
+It installs like any other app: a **VIDEO** icon on your home screen that you
+tap to launch. The Mac is only needed to put it there and to refresh the
+signing every 7 days on a free Apple ID (a paid developer account extends that
+to a year).
 
 ## Using it
 
