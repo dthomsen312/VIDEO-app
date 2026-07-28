@@ -208,6 +208,7 @@
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "VIDEO records short video clips of your work on a timer.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "VIDEO records audio along with each video clip.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "VIDEO saves each finished clip to your Photos library.";
 				INFOPLIST_KEY_UIFileSharingEnabled = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;
@@ -240,6 +241,7 @@
 				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "VIDEO records short video clips of your work on a timer.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "VIDEO records audio along with each video clip.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "VIDEO saves each finished clip to your Photos library.";
 				INFOPLIST_KEY_UIFileSharingEnabled = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UIStatusBarHidden = YES;

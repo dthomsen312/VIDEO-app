@@ -35,8 +35,10 @@ final class RecordingController: NSObject, ObservableObject {
     /// Seconds left in the current clip, or seconds until the next one starts.
     @Published private(set) var countdown: Int = 0
     @Published private(set) var clipsThisSession: Int = 0
+    @Published private(set) var savedToPhotos: Int = 0
     @Published private(set) var lastClipName: String?
     @Published private(set) var isReady = false
+    @Published private(set) var photosAccessGranted = false
     @Published var message: String?
 
     // MARK: - Capture
@@ -106,9 +108,22 @@ final class RecordingController: NSObject, ObservableObject {
             return
         }
 
+        // Ask for everything up front so nothing interrupts a session later.
+        var warnings: [String] = []
+
         let micGranted = await Self.requestAccess(for: .audio)
         if !micGranted {
-            message = "Microphone access is off, so clips will be silent. Enable it in Settings if you want sound."
+            warnings.append("Microphone access is off, so clips will be silent.")
+        }
+
+        photosAccessGranted = await PhotoLibrarySaver.requestAddAccess()
+        if !photosAccessGranted {
+            warnings.append("Photos access is off, so clips will stay in the app instead of your camera roll. "
+                            + "You can still get them from Files › On My iPhone › VIDEO › Recordings.")
+        }
+
+        if !warnings.isEmpty {
+            message = warnings.joined(separator: "\n\n")
         }
 
         hasConfigured = true
@@ -199,6 +214,7 @@ final class RecordingController: NSObject, ObservableObject {
         anchor = Date()
         nextClipIndex = 0
         clipsThisSession = 0
+        savedToPhotos = 0
         state = .waiting
         countdown = 0
         UIApplication.shared.isIdleTimerDisabled = true
@@ -316,6 +332,7 @@ final class RecordingController: NSObject, ObservableObject {
         if succeeded {
             clipsThisSession += 1
             lastClipName = url.lastPathComponent
+            if photosAccessGranted { exportToPhotos(url) }
         } else {
             try? FileManager.default.removeItem(at: url)
             message = errorText ?? "A clip failed to save."
@@ -325,6 +342,22 @@ final class RecordingController: NSObject, ObservableObject {
         guard state == .recording else { return }
         state = .waiting
         tick()
+    }
+
+    /// Hands the clip to Photos in the background so it never delays the next
+    /// clip. The working file is deleted only once Photos confirms the copy —
+    /// if the save fails the clip stays put in Recordings rather than vanishing.
+    private func exportToPhotos(_ url: URL) {
+        Task {
+            do {
+                try await PhotoLibrarySaver.shared.save(videoAt: url)
+                try? FileManager.default.removeItem(at: url)
+                savedToPhotos += 1
+            } catch {
+                message = "Couldn't add \(url.lastPathComponent) to Photos: "
+                    + "\(error.localizedDescription) It's still in the app's Recordings folder."
+            }
+        }
     }
 
     // MARK: - Notifications

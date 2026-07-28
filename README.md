@@ -17,7 +17,11 @@ The camera doesn't work in the Simulator, so run it on a real device.
    your own Apple ID. Change the bundle identifier from
    `com.example.HandsFreeRecorder` to something unique to you.
 3. Pick your iPhone as the run destination and hit ⌘R.
-4. Approve the camera and microphone prompts on first launch.
+4. Approve the camera, microphone, and "Add to Photos" prompts on first launch.
+
+It installs like any other app — a **VIDEO** icon on your home screen that you
+tap to launch. Xcode is only needed to put it there and to refresh the signing;
+you don't need the Mac to use it.
 
 With a free Apple ID the app expires after 7 days and needs a re-install; a paid
 developer account extends that to a year.
@@ -36,19 +40,26 @@ won't overheat and keep it plugged in for long sessions.
 
 ## Where the clips go
 
-Each clip is written to `Documents/Recordings` inside the app, named with the
-date and time it started:
+Each clip lands in your **Photos library**, in an album called **VIDEO**. They
+show up in the camera roll like anything else you shoot, back up with iCloud
+Photos, and survive deleting the app.
+
+Under the hood a clip is first written to `Documents/Recordings` with a
+timestamped name, then copied into Photos:
 
 ```
 Clip_2026-07-28_14-32-05.mov
 Clip_2026-07-28_14-34-05.mov
-Clip_2026-07-28_14-36-05.mov
 ```
 
-To get them off the phone, open **Files → On My iPhone → VIDEO → Recordings**.
-From there you can AirDrop them, copy them to iCloud Drive, or plug into a Mac.
-Nothing is written to the system Photos library — deleting the app deletes the
-clips, so move anything you want to keep.
+The working file is deleted only after Photos confirms it has the clip, so a
+failed save leaves the file in place rather than losing it. If a save does fail,
+the app says so and the clip stays in **Files → On My iPhone → VIDEO →
+Recordings**. That's also where everything goes if you decline Photos access —
+the app keeps recording either way.
+
+The footer on screen shows both tallies (`12 clips · 12 in Photos`), so a
+drifting gap between the two numbers means saves are failing.
 
 Rough sizing at the default 1080p preset: a 10-second clip is around 20 MB, so a
 two-hour painting session (60 clips) lands near 1.2 GB. The app warns you at
@@ -85,4 +96,6 @@ HandsFreeRecorder/
   CameraPreview.swift          AVCaptureVideoPreviewLayer wrapped for SwiftUI
   RecordingController.swift    Capture session + the repeating clip schedule
   ClipStorage.swift            Folder location, timestamped filenames, free space
+  PhotoLibrarySaver.swift      Copies finished clips into the Photos VIDEO album
+  Assets.xcassets/             App icon and accent color
 ```

@@ -73,10 +73,10 @@ struct ContentView: View {
 
     private var footer: some View {
         VStack(spacing: 4) {
-            Text("\(controller.clipsThisSession) clip\(controller.clipsThisSession == 1 ? "" : "s") this session")
+            Text(tallyText)
                 .font(.system(size: 18, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white)
-            Text(controller.lastClipName ?? "Saved to Files › On My iPhone › VIDEO › Recordings")
+            Text(controller.lastClipName ?? destinationText)
                 .font(.system(size: 13, weight: .regular, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.7))
                 .lineLimit(1)
@@ -122,6 +122,20 @@ struct ContentView: View {
         case .waiting: return .yellow
         case .recording: return .red
         }
+    }
+
+    private var tallyText: String {
+        let count = controller.clipsThisSession
+        let clips = "\(count) clip\(count == 1 ? "" : "s")"
+        return controller.photosAccessGranted
+            ? "\(clips) · \(controller.savedToPhotos) in Photos"
+            : "\(clips) this session"
+    }
+
+    private var destinationText: String {
+        controller.photosAccessGranted
+            ? "Saving to Photos › VIDEO album"
+            : "Saving to Files › On My iPhone › VIDEO"
     }
 
     private var dialCaption: String {
