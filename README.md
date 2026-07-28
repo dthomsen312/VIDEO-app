@@ -63,6 +63,42 @@ Rough sizing at the default 1080p preset: a 10-second clip is around 20 MB, so a
 two-hour painting session (60 clips) lands near 1.2 GB. The app warns you at
 start if the phone has less than 500 MB free.
 
+## Instagram Reels format (web version)
+
+Clips come out **1080×1920, 9:16, 30 fps, H.264 High profile with AAC audio**,
+at roughly 10 Mbps — ready to post with no cropping or re-encoding.
+
+1080×1920 is deliberately the ceiling, not a compromise. Instagram re-encodes
+every upload down to 1080 wide, so 4K source gains nothing and costs battery,
+heat, and storage to capture. 10 Mbps is comfortably above what Instagram
+retains, so their pass is effectively transparent.
+
+If the camera ever refuses to deliver portrait 9:16, frames are routed through
+a 1080×1920 centre-crop canvas so the file is Reels-shaped regardless. On an
+iPhone in portrait this path stays dormant and costs nothing. The tally line
+shows the resolution actually being captured.
+
+## Battery
+
+The camera is **powered down between clips**. It wakes 3 seconds before each
+clip so auto-exposure and white balance settle, records its 10 seconds, then
+shuts off — about 13 seconds of sensor time per 2-minute cycle instead of 120.
+Over a two-hour session that is roughly a tenth of the camera duty cycle.
+
+Three smaller savings on top:
+
+- The countdown loop wakes once a second while idling and only tightens near a
+  clip boundary, instead of five times a second throughout.
+- The idle screen is pure black, which on an OLED panel means unlit pixels.
+- Capture is capped at 30 fps, and the canvas path (when used at all) is
+  throttled to 30 fps rather than tracking the 120 Hz display.
+
+`track.stop()` is what actually powers the sensor down — setting
+`track.enabled = false` only blanks the frames and leaves the camera running.
+
+The screen still has to stay on for the whole session, and that remains the
+largest single draw. Keep the phone plugged in for anything long.
+
 ## Changing the timing
 
 Both numbers live at the top of `HandsFreeRecorder/RecordingController.swift`:

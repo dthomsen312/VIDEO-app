@@ -1,6 +1,6 @@
 // Caches the app shell so VIDEO opens and records with no network at all.
 // Bump CACHE when the app changes to retire the old copy.
-const CACHE = 'video-v1';
+const CACHE = 'video-v2';
 
 const SHELL = [
   './',

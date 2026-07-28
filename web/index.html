@@ -9,7 +9,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="VIDEO">
-<meta name="theme-color" content="#0c0c0f">
+<meta name="theme-color" content="#000000">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 
@@ -53,6 +53,7 @@
   .dot { width: 16px; height: 16px; border-radius: 50%; background: #888; }
   .dot.ready { background: #fff; }
   .dot.waiting { background: #ffd60a; }
+  .dot.warming { background: #ff9f0a; }
   .dot.rec { background: #ff3b30; }
 
   .spacer { flex: 1; }
@@ -61,6 +62,8 @@
     background: rgba(0,0,0,.5); border-radius: 28px;
     padding: 16px 30px; text-align: center;
   }
+  /* Pure black while the camera sleeps: unlit OLED pixels draw no power. */
+  .dial.asleep { background: #000; }
   .dial b {
     display: block; font-size: 88px; line-height: 1; font-weight: 800;
     font-variant-numeric: tabular-nums;
@@ -74,6 +77,7 @@
     text-align: center; font-size: 17px; font-weight: 600;
   }
   .tally em { display: block; font-style: normal; font-size: 13px; opacity: .7; margin-top: 3px; }
+  .tally em.warn { color: #ffd60a; }
 
   .controls { display: flex; gap: 14px; width: 100%; }
   .big {
@@ -89,7 +93,7 @@
 
   .overlay {
     position: fixed; inset: 0; z-index: 10;
-    background: rgba(0,0,0,.88);
+    background: rgba(0,0,0,.9);
     display: flex; flex-direction: column; align-items: center; justify-content: center;
     padding: 28px; text-align: center; gap: 14px;
   }
@@ -101,7 +105,6 @@
     font-size: 22px; font-weight: 800; color: #fff; background: #0a84ff; font-family: inherit;
   }
   .overlay button.ghost { background: transparent; color: #9b9ba1; font-size: 17px; padding: 12px; }
-  .warn { color: #ffd60a; font-size: 15px; }
 </style>
 </head>
 <body>
@@ -110,13 +113,13 @@
 <div id="recFrame"></div>
 
 <div class="ui">
-  <div class="status"><span id="dot" class="dot"></span><span id="statusText">Starting camera…</span></div>
+  <div class="status"><span id="dot" class="dot"></span><span id="statusText">Ready</span></div>
   <div class="spacer"></div>
   <div class="dial" id="dial"><b id="dialNum">--</b><span id="dialCap">10s clip every 2 min</span></div>
   <div class="spacer"></div>
-  <div class="tally"><span id="tallyMain">No clips yet</span><em id="tallySub">Clips stay here until you save them</em></div>
+  <div class="tally"><span id="tallyMain">No clips yet</span><em id="tallySub">Reels format · 1080×1920 · 30 fps</em></div>
   <div class="controls">
-    <button class="big start" id="startBtn" disabled>
+    <button class="big start" id="startBtn">
       <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>START
     </button>
     <button class="big stop" id="stopBtn" disabled>
@@ -125,7 +128,7 @@
   </div>
 </div>
 
-<div class="overlay" id="gate">
+<div class="overlay" id="gate" hidden>
   <h2>VIDEO</h2>
   <p id="gateText">This app needs your camera and microphone to record clips.</p>
   <button id="gateBtn">ENABLE CAMERA</button>
@@ -143,8 +146,23 @@
 (() => {
   'use strict';
 
+  // ---- Instagram Reels target --------------------------------------------
+  // Reels is 9:16 and Instagram re-encodes everything down to 1080 wide, so
+  // 1080x1920 is the highest resolution that survives intact. Sending 4K just
+  // hands their transcoder more to throw away — and costs battery and heat to
+  // capture. 30 fps is the Reels standard. ~10 Mbps is well above what
+  // Instagram retains, so it is transparent after their pass.
+  const TARGET_W  = 1080;
+  const TARGET_H  = 1920;
+  const TARGET_FPS = 30;
+  const VIDEO_BPS = 10000000;
+  const AUDIO_BPS = 128000;
+
   const CLIP_MS  = 10000;   // length of each clip
   const CYCLE_MS = 120000;  // start-of-clip to start-of-clip
+  // Camera is powered down between clips. It is woken this far ahead so
+  // auto-exposure and white balance have settled before recording starts.
+  const WARMUP_MS = 3000;
 
   const $ = id => document.getElementById(id);
   const preview = $('preview'), recFrame = $('recFrame'), dial = $('dial');
@@ -158,14 +176,22 @@
 
   let stream = null, mime = '', recorder = null, chunks = [];
   let clips = [], totalBytes = 0;
-  let state = 'idle';          // idle | waiting | recording
+  let state = 'idle';       // idle | waiting | warming | recording
   let anchor = 0, nextIndex = 0, clipEnd = 0, clipStartedAt = 0;
-  let ticker = null, clipTimer = null, wakeLock = null;
+  let tickTimer = null, clipTimer = null, wakeLock = null;
+  let acquiring = false, acquireFailures = 0, keepCameraAwake = false;
+  let sourceLabel = '';
 
-  // Safari records MP4; other browsers fall back to WebM. Pick whatever the
-  // engine will actually accept rather than assuming.
+  // Canvas normaliser — only used if the camera refuses to deliver 9:16.
+  let canvas = null, canvasCtx = null, canvasStream = null, drawing = false;
+
+  // ---- codec --------------------------------------------------------------
+
+  // H.264 High profile in MP4 is what Instagram wants. Baseline and WebM are
+  // fallbacks for non-Safari browsers.
   function pickMime() {
     const options = [
+      'video/mp4;codecs=avc1.640028,mp4a.40.2',
       'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
       'video/mp4',
       'video/webm;codecs=vp8,opus',
@@ -176,56 +202,159 @@
     return found === undefined ? '' : found;
   }
 
-  async function enableCamera() {
-    if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      gateText.textContent = 'This browser can’t record video. Open the app in Safari on iOS 15 or later.';
-      gateBtn.hidden = true;
-      return;
-    }
+  // ---- camera power -------------------------------------------------------
+
+  async function acquireCamera() {
+    if (stream) return true;
+    if (acquiring) return false;
+    acquiring = true;
+
+    // Portrait constraints: height greater than width. Asking for 1920x1080
+    // here is what produced landscape clips before.
+    const wanted = {
+      video: {
+        facingMode: { ideal: 'environment' },
+        width:  { ideal: TARGET_W },
+        height: { ideal: TARGET_H },
+        aspectRatio: { ideal: TARGET_W / TARGET_H },
+        frameRate: { ideal: TARGET_FPS, max: TARGET_FPS }
+      },
+      audio: true
+    };
 
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
-        audio: true
-      });
+      stream = await navigator.mediaDevices.getUserMedia(wanted);
     } catch (err) {
-      // Retry without audio — a denied mic shouldn't block video entirely.
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' } }, audio: false
-        });
+        // A refused mic shouldn't cost us the video.
+        wanted.audio = false;
+        stream = await navigator.mediaDevices.getUserMedia(wanted);
       } catch (err2) {
-        gateText.textContent = 'Camera access was denied. Allow it in Settings › Safari › Camera, then reopen VIDEO.';
-        gateBtn.textContent = 'TRY AGAIN';
-        return;
+        acquiring = false;
+        acquireFailures++;
+        if (acquireFailures >= 2) {
+          showGate('Camera access was denied or is unavailable. Allow it in Settings › Safari › Camera, then reopen VIDEO.');
+        }
+        return false;
       }
     }
 
+    acquiring = false;
+    acquireFailures = 0;
     mime = pickMime();
     preview.srcObject = stream;
-    preview.play().catch(() => {});
-    gate.hidden = true;
-    startBtn.disabled = false;
-    setStatus('ready', 'Ready');
+    const play = preview.play();
+    if (play && play.catch) play.catch(() => {});
+    describeSource();
+    return true;
   }
 
-  function start() {
-    if (state !== 'idle' || !stream) return;
+  function releaseCamera() {
+    stopDrawing();
+    if (canvasStream) {
+      canvasStream.getTracks().forEach(t => t.stop());
+      canvasStream = null;
+    }
+    if (!stream) return;
+    // stop() is the only thing that actually powers the sensor down;
+    // track.enabled = false just blanks the frames.
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    preview.srcObject = null;
+  }
+
+  function describeSource() {
+    const track = stream && stream.getVideoTracks()[0];
+    if (!track || !track.getSettings) return;
+    const s = track.getSettings();
+    if (!s.width || !s.height) return;
+    sourceLabel = s.width + '×' + s.height + ' · ' + Math.round(s.frameRate || TARGET_FPS) + ' fps';
+    if (!clips.length) tallySub.textContent = 'Reels format · ' + sourceLabel;
+  }
+
+  // ---- 9:16 guarantee -----------------------------------------------------
+
+  // Returns the stream to hand MediaRecorder. If the camera already gives us
+  // portrait 9:16 this is a pass-through and costs nothing. Otherwise frames
+  // go through a 1080x1920 centre-crop canvas so the file is Reels-shaped
+  // whatever the hardware did.
+  function recordingStream() {
+    const track = stream.getVideoTracks()[0];
+    const s = track.getSettings ? track.getSettings() : {};
+    const w = s.width, h = s.height;
+
+    if (w && h) {
+      const ratio = w / h;
+      const wantRatio = TARGET_W / TARGET_H;
+      if (h > w && Math.abs(ratio - wantRatio) < 0.03) return stream;   // already correct
+    }
+
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.width = TARGET_W;
+      canvas.height = TARGET_H;
+      canvasCtx = canvas.getContext('2d', { alpha: false });
+    }
+    if (!canvasStream) canvasStream = canvas.captureStream(TARGET_FPS);
+
+    startDrawing();
+
+    const tracks = canvasStream.getVideoTracks().slice();
+    const audio = stream.getAudioTracks();
+    if (audio.length) tracks.push(audio[0]);
+    return new MediaStream(tracks);
+  }
+
+  function startDrawing() {
+    if (drawing) return;
+    drawing = true;
+    let last = 0;
+    const minGap = 1000 / TARGET_FPS;
+
+    const step = now => {
+      if (!drawing) return;
+      requestAnimationFrame(step);
+      // The 16 Pro Max display runs at up to 120 Hz; throttle to 30 so we
+      // aren't compositing four times more often than we record.
+      if (now - last < minGap) return;
+      last = now;
+
+      const vw = preview.videoWidth, vh = preview.videoHeight;
+      if (!vw || !vh) return;
+      const scale = Math.max(TARGET_W / vw, TARGET_H / vh);   // cover
+      const dw = vw * scale, dh = vh * scale;
+      canvasCtx.drawImage(preview, (TARGET_W - dw) / 2, (TARGET_H - dh) / 2, dw, dh);
+    };
+    requestAnimationFrame(step);
+  }
+
+  function stopDrawing() { drawing = false; }
+
+  // ---- session ------------------------------------------------------------
+
+  async function start() {
+    if (state !== 'idle') return;
     sheet.hidden = true;
+    startBtn.disabled = true;
+
+    setStatus('warming', 'Waking camera…');
+    const ok = await acquireCamera();
+    if (!ok) { startBtn.disabled = false; setStatus('ready', 'Ready'); return; }
+
+    // Anchor after the camera is live so clip 1 is instant and the 2-minute
+    // grid lines up with it.
     anchor = Date.now();
     nextIndex = 0;
-    state = 'waiting';
-    startBtn.disabled = true;
+    state = 'warming';
     stopBtn.disabled = false;
     keepAwake();
-    ticker = setInterval(tick, 200);
-    tick();  // clip 1 is due immediately
+    loop();
   }
 
   function stop(note) {
     if (state === 'idle') return;
     state = 'idle';
-    clearInterval(ticker); ticker = null;
+    clearTimeout(tickTimer); tickTimer = null;
     clearTimeout(clipTimer); clipTimer = null;
     if (recorder && recorder.state !== 'inactive') recorder.stop();
     releaseWake();
@@ -233,35 +362,79 @@
     stopBtn.disabled = true;
     recFrame.classList.remove('on');
     dial.classList.remove('rec');
+    dial.classList.remove('asleep');
     dialNum.textContent = '--';
     setStatus('ready', note || 'Ready');
-    // Let the last clip's onstop land before totting up.
-    setTimeout(showSheet, 350);
+    setTimeout(() => {
+      showSheet();
+      // Bring the preview back so the phone can be re-aimed. The wake lock is
+      // released by now, so the screen sleeps on its own and takes the camera
+      // with it if this is left sitting.
+      acquireCamera();
+    }, 400);
+  }
+
+  // Adaptive pacing: one wake a second while idling, tight only when a clip
+  // boundary is close. At 200 ms flat this loop alone woke the CPU 36,000
+  // times over a two-hour session.
+  function nextDelay() {
+    if (state === 'recording') return 250;
+    if (state === 'warming') return 100;
+    const untilWake = (anchor + nextIndex * CYCLE_MS - WARMUP_MS) - Date.now();
+    if (untilWake > 5000) return 1000;
+    return 200;
+  }
+
+  function loop() {
+    tick();
+    if (state !== 'idle') tickTimer = setTimeout(loop, nextDelay());
   }
 
   function tick() {
     const now = Date.now();
-    if (state === 'recording') {
+    const due = anchor + nextIndex * CYCLE_MS;
+
+    if (state === 'waiting') {
+      setDial(Math.ceil((due - now) / 1000), 'until next clip');
+      if (now >= due - WARMUP_MS) {
+        state = 'warming';
+        setStatus('warming', 'Waking camera…');
+        dial.classList.remove('asleep');
+        acquireCamera().then(ok => {
+          if (!ok && state === 'warming') state = 'waiting';   // retry next tick
+        });
+      }
+    } else if (state === 'warming') {
+      setDial(Math.ceil((due - now) / 1000), 'until next clip');
+      if (now >= due && stream) beginClip();
+    } else if (state === 'recording') {
       setDial(Math.ceil((clipEnd - now) / 1000), 'seconds left in clip');
-    } else if (state === 'waiting') {
-      const due = anchor + nextIndex * CYCLE_MS;
-      if (now >= due) beginClip();
-      else setDial(Math.ceil((due - now) / 1000), 'until next clip');
     }
   }
 
   function beginClip() {
-    if (state !== 'waiting') return;
-    chunks = [];
+    if (state !== 'warming' || !stream) return;
+
+    let target;
     try {
-      recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      target = recordingStream();
+      recorder = new MediaRecorder(target, {
+        mimeType: mime || undefined,
+        videoBitsPerSecond: VIDEO_BPS,
+        audioBitsPerSecond: AUDIO_BPS
+      });
     } catch (err) {
-      stop('Recorder failed');
-      gate.hidden = false;
-      gateText.textContent = 'This browser refused to start a recording: ' + err.message;
-      return;
+      // Some engines reject the bitrate hints; retry with defaults.
+      try {
+        recorder = new MediaRecorder(target || stream, mime ? { mimeType: mime } : undefined);
+      } catch (err2) {
+        stop('Recorder failed');
+        showGate('This browser refused to start a recording: ' + err2.message);
+        return;
+      }
     }
 
+    chunks = [];
     recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
     recorder.onstop = clipStopped;
     recorder.start();
@@ -284,6 +457,7 @@
     const type = mime || 'video/mp4';
     const blob = new Blob(chunks, { type });
     chunks = [];
+    stopDrawing();
 
     if (blob.size) {
       const ext = type.indexOf('mp4') !== -1 ? 'mp4' : 'webm';
@@ -297,26 +471,35 @@
 
     // If STOP was pressed mid-clip we're already idle — leave it that way.
     if (state !== 'recording') return;
+
+    // Power the camera down until shortly before the next clip. This is where
+    // nearly all the battery saving comes from: the sensor is live for ~13s
+    // per 2-minute cycle instead of the whole 120.
+    if (!keepCameraAwake) releaseCamera();
+
     state = 'waiting';
-    setStatus('waiting', 'Waiting');
+    setStatus('waiting', keepCameraAwake ? 'Waiting' : 'Waiting · camera asleep');
+    dial.classList.add('asleep');
     tick();
   }
+
+  // ---- saving -------------------------------------------------------------
 
   function showSheet() {
     if (!clips.length) return;
     sheetSummary.textContent =
-      clips.length + ' clip' + (clips.length === 1 ? '' : 's') + ' · ' + mb(totalBytes) + ' MB ready to save';
+      clips.length + ' clip' + (clips.length === 1 ? '' : 's') + ' · ' + mb(totalBytes) + ' MB · ready for Reels';
     sheet.hidden = false;
   }
 
-  // navigator.share must be called straight from the tap — no awaits before it,
-  // or iOS drops the user-gesture and refuses.
+  // navigator.share must be called straight from the tap — no awaits before
+  // it, or iOS drops the user-gesture and refuses.
   saveBtn.addEventListener('click', () => {
     if (!clips.length) return;
     if (navigator.canShare && navigator.canShare({ files: clips })) {
       navigator.share({ files: clips })
         .then(() => { clips = []; totalBytes = 0; renderTally(); sheet.hidden = true; })
-        .catch(() => {});   // user cancelled the share sheet
+        .catch(() => {});
     } else {
       downloadAll();
     }
@@ -334,8 +517,10 @@
     }, i * 900));
   }
 
+  // ---- screen wake --------------------------------------------------------
+
   async function keepAwake() {
-    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) { /* unsupported */ }
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
   }
   function releaseWake() {
     try { if (wakeLock) wakeLock.release(); } catch (e) {}
@@ -350,9 +535,17 @@
     }
   });
 
+  // ---- rendering ----------------------------------------------------------
+
+  function showGate(text) {
+    gateText.textContent = text;
+    gateBtn.textContent = 'TRY AGAIN';
+    gate.hidden = false;
+  }
+
   function setStatus(kind, text) {
     dot.className = 'dot ' + kind;
-    statusText.textContent = text;
+    if (statusText.textContent !== text) statusText.textContent = text;
   }
 
   function setDial(seconds, caption) {
@@ -365,14 +558,18 @@
   function renderTally() {
     if (!clips.length) {
       tallyMain.textContent = 'No clips yet';
-      tallySub.textContent = 'Clips stay here until you save them';
+      tallySub.textContent = 'Reels format · ' + (sourceLabel || '1080×1920 · 30 fps');
+      tallySub.className = '';
       return;
     }
     tallyMain.textContent = clips.length + ' clip' + (clips.length === 1 ? '' : 's') + ' · ' + mb(totalBytes) + ' MB';
-    tallySub.textContent = clips.length >= 40
-      ? 'Getting large — stop and save soon so nothing is lost'
-      : 'Not saved yet — press STOP, then Save to Photos';
-    tallySub.className = clips.length >= 40 ? 'warn' : '';
+    if (clips.length >= 40) {
+      tallySub.textContent = 'Getting large — stop and save soon so nothing is lost';
+      tallySub.className = 'warn';
+    } else {
+      tallySub.textContent = 'Not saved yet — press STOP, then Save to Photos';
+      tallySub.className = '';
+    }
   }
 
   const mb = bytes => Math.round(bytes / 1048576);
@@ -383,18 +580,27 @@
            p(d.getHours()) + '-' + p(d.getMinutes()) + '-' + p(d.getSeconds());
   }
 
+  // ---- wiring -------------------------------------------------------------
+
   startBtn.addEventListener('click', start);
   stopBtn.addEventListener('click', () => stop());
-  gateBtn.addEventListener('click', enableCamera);
+  gateBtn.addEventListener('click', () => { gate.hidden = true; acquireFailures = 0; start(); });
 
   dialCap.textContent = (CLIP_MS / 1000) + 's clip every ' + (CYCLE_MS / 60000) + ' min';
+
+  if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showGate('This browser can’t record video. Open VIDEO in Safari on iOS 15 or later.');
+    gateBtn.hidden = true;
+    startBtn.disabled = true;
+  }
 
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 
-  // Try straight away; the gate stays up if the browser wants a tap first.
-  enableCamera();
+  // Live preview from the moment the app opens, so the phone can be aimed
+  // before starting. The sensor only sleeps between clips once a session runs.
+  if (!startBtn.disabled) acquireCamera();
 })();
 </script>
 </body>
