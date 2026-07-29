@@ -85,6 +85,8 @@
     font-family: inherit; font-size: 13px; font-weight: 800;
   }
   #micBtn.on { background: #ff9f0a; color: #000; }
+  /* Mic was asked for but the stream came back without it. */
+  #micBtn.warn { background: #ff453a; color: #fff; font-size: 11px; }
   #micBtn:disabled { opacity: .3; }
   #zoomBar button {
     width: 54px; height: 54px; border: 0; border-radius: 50%;
@@ -284,6 +286,7 @@
   let cropFactor = 1;             // digital zoom applied in the canvas
   let focusLocked = false, focusSupported = true;
   let micEnabled = true;    // audio on; see audioConstraints() for the routing fix
+  let audioLive = false;    // whether the open stream actually carries a mic track
 
   let canvas = null, canvasCtx = null, canvasStream = null, drawing = false;
 
@@ -399,31 +402,45 @@
     // session, which pulls any connected Bluetooth device onto the hands-free
     // (phone call) profile — that is why smart glasses stop being able to
     // record while a clip runs. Video-only touches no audio session at all.
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: video, audio: audioConstraints() });
-    } catch (err) {
+    // Tried in order, most specific first. Audio is attempted twice — once with
+    // the routing constraints, once plain — before it is given up, so a picky
+    // constraint can't be what leaves a session silent. Video-only is the last
+    // resort rather than an early fallback: a mic problem should never be the
+    // reason a painting session records nothing at all.
+    const generic = { facingMode: { ideal: 'environment' } };
+    const attempts = micEnabled ? [
+      { video: video,   audio: audioConstraints() },
+      { video: video,   audio: true },
+      { video: generic, audio: audioConstraints() },
+      { video: generic, audio: true },
+      { video: video,   audio: false },
+      { video: generic, audio: false }
+    ] : [
+      { video: video,   audio: false },
+      { video: generic, audio: false }
+    ];
+
+    for (let i = 0; i < attempts.length; i++) {
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: video, audio: false });
-      } catch (err2) {
-        try {
-          // Requested lens unavailable — fall back to whatever the phone gives.
-          stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: 'environment' } }, audio: audioConstraints()
-          });
-        } catch (err3) {
-          acquiring = false;
-          acquireFailures++;
-          if (acquireFailures >= 2) {
-            showGate('Camera access was denied or is unavailable. Allow it in Settings › Safari › Camera, then reopen VIDEO.');
-          }
-          return false;
-        }
+        stream = await navigator.mediaDevices.getUserMedia(attempts[i]);
+        break;
+      } catch (err) { /* try the next combination */ }
+    }
+
+    if (!stream) {
+      acquiring = false;
+      acquireFailures++;
+      if (acquireFailures >= 2) {
+        showGate('Camera access was denied or is unavailable. Allow it in Settings › Safari › Camera, then reopen VIDEO.');
       }
+      return false;
     }
 
     acquiring = false;
     acquireFailures = 0;
-    mime = pickMime(stream.getAudioTracks().length > 0);
+    audioLive = stream.getAudioTracks().length > 0;
+    mime = pickMime(audioLive);
+    renderMic();
 
     const track = stream.getVideoTracks()[0];
     try { activeLensId = (track.getSettings() || {}).deviceId || ''; } catch (e) { activeLensId = ''; }
@@ -510,9 +527,16 @@
   // Audio is on by default; audioConstraints() keeps it from hijacking
   // Bluetooth. SILENT is the guaranteed escape hatch: with no microphone
   // request at all, iOS opens no audio session and nothing can be commandeered.
+  //
+  // The button reports what the stream actually carries, not what was asked
+  // for. If the mic request fails, acquireCamera falls back to video-only so
+  // the session still runs — without this readout that would show up later as
+  // a folder of silent clips.
   function renderMic() {
-    micBtn.textContent = micEnabled ? 'MIC' : 'SILENT';
-    micBtn.classList.toggle('on', micEnabled);
+    if (!micEnabled) micBtn.textContent = 'SILENT';
+    else micBtn.textContent = (stream && !audioLive) ? 'NO MIC' : 'MIC';
+    micBtn.classList.toggle('on', micEnabled && !(stream && !audioLive));
+    micBtn.classList.toggle('warn', micEnabled && !!stream && !audioLive);
     micBtn.disabled = (state === 'recording' || state === 'warming');
   }
 
@@ -537,6 +561,7 @@
     // track.enabled = false just blanks the frames.
     stream.getTracks().forEach(t => t.stop());
     stream = null;
+    audioLive = false;
     preview.srcObject = null;
   }
 
@@ -548,6 +573,7 @@
     if (!s.width || !s.height) return;
     sourceLabel = s.width + '×' + s.height + ' · ' + zoomText(preset.z);
     if (cropFactor > 1) sourceLabel += ' crop';
+    sourceLabel += audioLive ? ' · sound' : ' · no sound';
     if (!clips.length) tallySub.textContent = sourceLabel + (cropFactor > 1 ? ' → 1080×1920' : ' · recorded as-is');
   }
 
@@ -623,7 +649,7 @@
   const durationLabel = sec => {
     if (sec < 60) return sec + ' sec';
     const m = sec / 60;
-    return (m % 1 === 0 ? m : m.toFixed(1)) + (m === 1 ? ' min' : ' min');
+    return (m % 1 === 0 ? m : m.toFixed(1)) + ' min';
   };
 
   function buildDurationMenus() {
