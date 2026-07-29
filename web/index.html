@@ -22,14 +22,18 @@
     -webkit-user-select: none; user-select: none;
   }
 
-  /* The preview is a 9:16 box — the exact shape that gets recorded — rather
-     than filling the whole 19.5:9 screen. Filling the screen would crop the
-     frame a second time on top of the capture crop, which reads as zoom. */
-  #preview {
+  /* The stage is exactly 9:16 — the shape that gets recorded. Digital zoom is
+     a transform on the video inside it, so the preview always shows the same
+     framing the file will get. */
+  #stage {
     position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
     width: 100%; max-width: 100%; max-height: 100%;
     aspect-ratio: 9 / 16;
-    object-fit: cover; background: #000;
+    overflow: hidden; background: #000;
+  }
+  #preview {
+    display: block; width: 100%; height: 100%;
+    object-fit: cover; transform-origin: center center;
   }
 
   #recFrame {
@@ -60,15 +64,21 @@
   .dot.warming { background: #ff9f0a; }
   .dot.rec { background: #ff3b30; }
 
-  #lensBtn {
-    position: fixed; z-index: 5;
-    top: calc(env(safe-area-inset-top) + 12px); right: 16px;
-    background: rgba(0,0,0,.6); color: #fff; border: 0; border-radius: 999px;
-    padding: 12px 18px; font-size: 15px; font-weight: 700; font-family: inherit;
-    max-width: 45%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  /* Zoom selector, top right, mirroring the stock Camera app's steps. */
+  #zoomBar {
+    position: fixed; z-index: 6;
+    top: calc(env(safe-area-inset-top) + 10px); right: 14px;
+    display: flex; flex-direction: column; gap: 8px;
+    background: rgba(0,0,0,.5); border-radius: 999px; padding: 8px;
   }
-  #lensBtn:disabled { opacity: .3; }
-  #lensBtn[hidden] { display: none; }
+  #zoomBar button {
+    width: 54px; height: 54px; border: 0; border-radius: 50%;
+    background: rgba(255,255,255,.14); color: #fff;
+    font-family: inherit; font-size: 16px; font-weight: 800;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #zoomBar button.on { background: #fff; color: #000; }
+  #zoomBar button:disabled { opacity: .25; }
 
   .spacer { flex: 1; }
 
@@ -123,8 +133,15 @@
 </head>
 <body>
 
-<video id="preview" playsinline autoplay muted></video>
+<div id="stage"><video id="preview" playsinline autoplay muted></video></div>
 <div id="recFrame"></div>
+
+<div id="zoomBar">
+  <button data-z="0.5">.5</button>
+  <button data-z="1" class="on">1×</button>
+  <button data-z="2">2</button>
+  <button data-z="5">5</button>
+</div>
 
 <div class="ui">
   <div class="status"><span id="dot" class="dot"></span><span id="statusText">Ready</span></div>
@@ -141,8 +158,6 @@
     </button>
   </div>
 </div>
-
-<button id="lensBtn" hidden>LENS</button>
 
 <div class="overlay" id="gate" hidden>
   <h2>VIDEO</h2>
@@ -163,43 +178,64 @@
   'use strict';
 
   // ---- Instagram Reels target --------------------------------------------
-  // Reels is 9:16 and Instagram re-encodes everything down to 1080 wide, so
-  // 1080x1920 is the highest resolution that survives intact. The 9:16 shaping
-  // happens in the canvas below, NOT as a getUserMedia constraint — asking the
-  // camera for a 9:16 aspect ratio makes Safari crop into a natively 4:3
-  // sensor, which looks like a permanent zoom.
+  // Instagram re-encodes everything down to 1080 wide, so 1080x1920 is the
+  // highest resolution that survives. The 9:16 shaping is done here in the
+  // canvas, never as a getUserMedia constraint: asking the camera for a
+  // particular aspect ratio makes Safari crop into the sensor, which is
+  // indistinguishable from a zoom you can't undo.
   const TARGET_W  = 1080;
   const TARGET_H  = 1920;
   const TARGET_FPS = 30;
   const VIDEO_BPS = 10000000;
   const AUDIO_BPS = 128000;
 
-  const CLIP_MS  = 10000;   // length of each clip
-  const CYCLE_MS = 120000;  // start-of-clip to start-of-clip
-  // Camera is powered down between clips. It is woken this far ahead so
-  // auto-exposure and white balance have settled before recording starts.
+  // iPhone sensors are natively 4:3, so capture is requested in that shape
+  // (3:4 in portrait) to get the full field of view with nothing cropped away
+  // at capture time.
+  const SENSOR_RATIO = 3 / 4;
+  const MAX_CAPTURE_H = 3840;   // don't ask for more than 4K
+
+  const CLIP_MS  = 10000;
+  const CYCLE_MS = 120000;
   const WARMUP_MS = 3000;
 
-  const LENS_KEY = 'video.lensId';
+  const ZOOM_KEY = 'video.zoom';
+
+  // On an iPhone 16 Pro Max: .5 is the ultra wide, 1 is the 24mm main camera,
+  // 5 is the tetraprism telephoto. 2 has no lens of its own — the stock Camera
+  // app produces it by cropping the middle of the main sensor, which is what
+  // `digital: 2` does here, capturing at 4K first so the crop stays sharp.
+  const PRESETS = [
+    { z: 0.5, lens: 'ultra', digital: 1 },
+    { z: 1,   lens: 'wide',  digital: 1 },
+    { z: 2,   lens: 'wide',  digital: 2 },
+    { z: 5,   lens: 'tele',  digital: 1 }
+  ];
 
   const $ = id => document.getElementById(id);
   const preview = $('preview'), recFrame = $('recFrame'), dial = $('dial');
   const dot = $('dot'), statusText = $('statusText');
   const dialNum = $('dialNum'), dialCap = $('dialCap');
   const tallyMain = $('tallyMain'), tallySub = $('tallySub');
-  const startBtn = $('startBtn'), stopBtn = $('stopBtn'), lensBtn = $('lensBtn');
+  const startBtn = $('startBtn'), stopBtn = $('stopBtn');
+  const zoomBar = $('zoomBar');
   const gate = $('gate'), gateText = $('gateText'), gateBtn = $('gateBtn');
   const sheet = $('sheet'), sheetSummary = $('sheetSummary');
   const saveBtn = $('saveBtn'), laterBtn = $('laterBtn');
 
   let stream = null, mime = '', recorder = null, chunks = [];
   let clips = [], totalBytes = 0;
-  let state = 'idle';       // idle | waiting | warming | recording
+  let state = 'idle';
   let anchor = 0, nextIndex = 0, clipEnd = 0, clipStartedAt = 0;
   let tickTimer = null, clipTimer = null, wakeLock = null;
-  let acquiring = false, acquireFailures = 0, keepCameraAwake = false;
+  let acquiring = false, acquireFailures = 0;
   let sourceLabel = '';
-  let lenses = [], lensIndex = 0, lensesLoaded = false;
+
+  let cams = { ultra: null, wide: null, tele: null };
+  let camsLoaded = false;
+  let preset = PRESETS[1];        // 1× default
+  let activeLensId = '';          // deviceId currently open
+  let cropFactor = 1;             // digital zoom applied in the canvas
 
   let canvas = null, canvasCtx = null, canvasStream = null, drawing = false;
 
@@ -218,35 +254,44 @@
     return found === undefined ? '' : found;
   }
 
-  // ---- camera power -------------------------------------------------------
+  // ---- capture ------------------------------------------------------------
+
+  function constraintsFor(p) {
+    // Capture at (digital zoom)x the delivery resolution so cropping in for 2x
+    // samples real pixels instead of upscaling. Width and height are always a
+    // true 3:4 pair — asking for a square or a 9:16 pair is what made Safari
+    // crop the sensor and look permanently zoomed.
+    const h = Math.min(MAX_CAPTURE_H, Math.round(TARGET_H * p.digital));
+    const w = Math.round(h * SENSOR_RATIO);
+
+    const video = {
+      width:  { ideal: w },
+      height: { ideal: h },
+      frameRate: { ideal: TARGET_FPS, max: TARGET_FPS }
+    };
+
+    const dev = cams[p.lens];
+    if (dev) video.deviceId = { exact: dev.deviceId };
+    else video.facingMode = { ideal: 'environment' };
+
+    return video;
+  }
 
   async function acquireCamera() {
     if (stream) return true;
     if (acquiring) return false;
     acquiring = true;
 
-    // Deliberately loose. No aspectRatio, and resolution asked for only as a
-    // hint on the long edge — over-constraining is what made Safari crop the
-    // sensor. The canvas handles Reels shaping afterwards.
-    const video = {
-      width:  { ideal: TARGET_H },
-      height: { ideal: TARGET_H },
-      frameRate: { ideal: TARGET_FPS, max: TARGET_FPS }
-    };
-
-    const chosen = lenses[lensIndex];
-    if (chosen && chosen.deviceId) video.deviceId = { exact: chosen.deviceId };
-    else video.facingMode = { ideal: 'environment' };
+    const video = constraintsFor(preset);
 
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: video, audio: true });
     } catch (err) {
       try {
-        // A refused mic shouldn't cost us the video.
         stream = await navigator.mediaDevices.getUserMedia({ video: video, audio: false });
       } catch (err2) {
-        // A specific lens can vanish; fall back to whatever the phone offers.
         try {
+          // Requested lens unavailable — fall back to whatever the phone gives.
           stream = await navigator.mediaDevices.getUserMedia({
             video: { facingMode: { ideal: 'environment' } }, audio: true
           });
@@ -264,26 +309,47 @@
     acquiring = false;
     acquireFailures = 0;
     mime = pickMime();
-    resetZoom();
+
+    const track = stream.getVideoTracks()[0];
+    try { activeLensId = (track.getSettings() || {}).deviceId || ''; } catch (e) { activeLensId = ''; }
+
+    applyZoom();
     preview.srcObject = stream;
     const play = preview.play();
     if (play && play.catch) play.catch(() => {});
     describeSource();
-    loadLenses();
+    loadCameras();
     return true;
   }
 
-  // Some cameras hand back a track that is already zoomed in. If the track
-  // exposes a zoom capability, wind it all the way back out.
-  function resetZoom() {
+  // Prefer real optical zoom when the track exposes it; otherwise the canvas
+  // crop does the work. Safari on iOS generally does not expose zoom, so this
+  // is a bonus path rather than the main one.
+  function applyZoom() {
+    cropFactor = preset.digital;
     const track = stream && stream.getVideoTracks()[0];
-    if (!track || !track.getCapabilities || !track.applyConstraints) return;
+    if (!track || !track.getCapabilities || !track.applyConstraints) { updatePreviewZoom(); return; }
+
     let caps = null;
-    try { caps = track.getCapabilities(); } catch (e) { return; }
-    if (!caps || !caps.zoom || typeof caps.zoom.min !== 'number') return;
-    track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] })
-      .then(describeSource)
-      .catch(() => {});
+    try { caps = track.getCapabilities(); } catch (e) { caps = null; }
+
+    if (!caps || !caps.zoom || typeof caps.zoom.max !== 'number') { updatePreviewZoom(); return; }
+
+    const want = Math.max(caps.zoom.min, Math.min(caps.zoom.max, preset.digital));
+    track.applyConstraints({ advanced: [{ zoom: want }] }).then(() => {
+      let got = 1;
+      try { got = track.getSettings().zoom || 1; } catch (e) {}
+      // Only stop cropping if the hardware actually delivered the zoom.
+      if (Math.abs(got - preset.digital) < 0.05) cropFactor = 1;
+      updatePreviewZoom();
+      describeSource();
+    }).catch(() => { updatePreviewZoom(); });
+  }
+
+  // The preview is transformed by the same factor the canvas crops by, so what
+  // is on screen is what lands in the file.
+  function updatePreviewZoom() {
+    preview.style.transform = cropFactor === 1 ? '' : 'scale(' + cropFactor + ')';
   }
 
   function releaseCamera() {
@@ -293,7 +359,7 @@
       canvasStream = null;
     }
     if (!stream) return;
-    // stop() is the only thing that actually powers the sensor down;
+    // stop() is the only thing that powers the sensor down; setting
     // track.enabled = false just blanks the frames.
     stream.getTracks().forEach(t => t.stop());
     stream = null;
@@ -306,66 +372,67 @@
     let s = {};
     try { s = track.getSettings() || {}; } catch (e) { return; }
     if (!s.width || !s.height) return;
-    sourceLabel = s.width + '×' + s.height;
-    if (typeof s.zoom === 'number') sourceLabel += ' · zoom ' + s.zoom.toFixed(1) + '×';
-    if (!clips.length) tallySub.textContent = 'Source ' + sourceLabel + ' → 1080×1920';
+    sourceLabel = s.width + '×' + s.height + ' · ' + zoomText(preset.z);
+    if (cropFactor > 1) sourceLabel += ' crop';
+    if (!clips.length) tallySub.textContent = sourceLabel + ' → 1080×1920';
   }
+
+  const zoomText = z => (z === 1 ? '1×' : (z + '×'));
 
   // ---- lenses -------------------------------------------------------------
 
-  // Labels are only populated once camera permission has been granted, so this
+  // Device labels only appear once camera permission has been granted, so this
   // runs after the first successful acquire.
-  function loadLenses() {
-    if (lensesLoaded || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+  function loadCameras() {
+    if (camsLoaded || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
     navigator.mediaDevices.enumerateDevices().then(devices => {
-      const cams = devices.filter(d => d.kind === 'videoinput' && d.deviceId);
-      if (!cams.length) return;
+      const vids = devices.filter(d => d.kind === 'videoinput' && d.deviceId);
+      if (!vids.length) return;
+      camsLoaded = true;
 
-      // Prefer the rear cameras; a painter filming their easel never wants the
-      // selfie camera in the rotation.
-      const back = cams.filter(d => /back|rear|environment/i.test(d.label || ''));
-      lenses = back.length ? back : cams;
-      lensesLoaded = true;
+      const back = vids.filter(d => !/front|face|selfie/i.test(d.label || ''));
+      const pool = back.length ? back : vids;
 
-      const savedId = safeGet(LENS_KEY);
-      const savedAt = lenses.findIndex(d => d.deviceId === savedId);
-      const currentTrack = stream && stream.getVideoTracks()[0];
-      let currentId = '';
-      try { currentId = currentTrack ? (currentTrack.getSettings().deviceId || '') : ''; } catch (e) {}
-      const currentAt = lenses.findIndex(d => d.deviceId === currentId);
+      cams.ultra = pool.find(d => /ultra/i.test(d.label || '')) || null;
+      cams.tele  = pool.find(d => /tele/i.test(d.label || '')) || null;
+      cams.wide  = pool.find(d => /back camera$/i.test((d.label || '').trim()))
+                || pool.find(d => /dual wide|triple|dual/i.test(d.label || ''))
+                || pool.find(d => d !== cams.ultra && d !== cams.tele)
+                || pool[0];
 
-      lensIndex = savedAt >= 0 ? savedAt : (currentAt >= 0 ? currentAt : 0);
-
-      if (lenses.length > 1) {
-        lensBtn.hidden = false;
-        renderLens();
-      }
+      renderZoomBar();
     }).catch(() => {});
   }
 
-  function renderLens() {
-    const d = lenses[lensIndex];
-    if (!d) return;
-    lensBtn.textContent = shortLensName(d.label) + (lenses.length > 1 ? '  ⇄' : '');
+  function renderZoomBar() {
+    Array.prototype.forEach.call(zoomBar.children, btn => {
+      const z = parseFloat(btn.getAttribute('data-z'));
+      const p = PRESETS.find(x => x.z === z);
+      btn.classList.toggle('on', p === preset);
+      // 0.5x needs a real ultra-wide; you cannot digitally zoom outwards.
+      btn.disabled = camsLoaded && p.z === 0.5 && !cams.ultra;
+    });
   }
 
-  function shortLensName(label) {
-    if (!label) return 'Lens';
-    return label
-      .replace(/camera/i, '')
-      .replace(/\bback\b/i, '')
-      .replace(/\s+/g, ' ')
-      .trim() || 'Back';
-  }
+  function chooseZoom(z) {
+    const p = PRESETS.find(x => x.z === z);
+    if (!p || p === preset || state === 'recording') return;
 
-  function cycleLens() {
-    if (state !== 'idle' || lenses.length < 2) return;
-    lensIndex = (lensIndex + 1) % lenses.length;
-    safeSet(LENS_KEY, lenses[lensIndex].deviceId);
-    renderLens();
-    lensBtn.disabled = true;
-    releaseCamera();
-    acquireCamera().then(() => { lensBtn.disabled = false; });
+    const prevLens = preset.lens;
+    preset = p;
+    safeSet(ZOOM_KEY, String(z));
+    renderZoomBar();
+
+    const needsNewLens = prevLens !== p.lens || !stream;
+    if (!stream) { describeSource(); return; }   // asleep; takes effect on next wake
+
+    if (needsNewLens) {
+      releaseCamera();
+      acquireCamera();
+    } else {
+      applyZoom();          // same lens, digital-only change — instant
+      describeSource();
+    }
   }
 
   function safeGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
@@ -373,17 +440,17 @@
 
   // ---- 9:16 shaping -------------------------------------------------------
 
-  // Always route through the canvas so the file is exactly 1080x1920 whatever
-  // the camera handed us, and so the crop is ours to control rather than
-  // something Safari does to the sensor.
   function recordingStream() {
     const track = stream.getVideoTracks()[0];
     let s = {};
     try { s = track.getSettings ? (track.getSettings() || {}) : {}; } catch (e) {}
     const w = s.width, h = s.height;
 
-    if (w && h && h > w && Math.abs((w / h) - (TARGET_W / TARGET_H)) < 0.02) {
-      return stream;   // already exactly Reels-shaped; no need to redraw
+    // Straight through only when the camera already matches the target exactly
+    // and no digital crop is wanted.
+    if (cropFactor === 1 && w && h && h > w &&
+        Math.abs((w / h) - (TARGET_W / TARGET_H)) < 0.02) {
+      return stream;
     }
 
     if (!canvas) {
@@ -411,16 +478,17 @@
     const step = now => {
       if (!drawing) return;
       requestAnimationFrame(step);
-      // The 16 Pro Max display runs at up to 120 Hz; throttle to 30 so we
-      // aren't compositing four times more often than we record.
+      // The 16 Pro Max panel runs up to 120 Hz; throttle to 30 so we aren't
+      // compositing four times more often than we record.
       if (now - last < minGap) return;
       last = now;
 
       const vw = preview.videoWidth, vh = preview.videoHeight;
       if (!vw || !vh) return;
-      // Cover: fill 1080x1920, cropping the long axis. Taking the minimum
-      // instead would letterbox, and Instagram would just crop it anyway.
-      const scale = Math.max(TARGET_W / vw, TARGET_H / vh);
+      // Cover the 1080x1920 frame, then apply digital zoom about the centre.
+      // At 1x with a 3:4 source this keeps the full vertical field of view and
+      // trims only the sides — no magnification at all.
+      const scale = Math.max(TARGET_W / vw, TARGET_H / vh) * cropFactor;
       const dw = vw * scale, dh = vh * scale;
       canvasCtx.drawImage(preview, (TARGET_W - dw) / 2, (TARGET_H - dh) / 2, dw, dh);
     };
@@ -435,11 +503,10 @@
     if (state !== 'idle') return;
     sheet.hidden = true;
     startBtn.disabled = true;
-    lensBtn.disabled = true;
 
     setStatus('warming', 'Waking camera…');
     const ok = await acquireCamera();
-    if (!ok) { startBtn.disabled = false; lensBtn.disabled = false; setStatus('ready', 'Ready'); return; }
+    if (!ok) { startBtn.disabled = false; setStatus('ready', 'Ready'); return; }
 
     anchor = Date.now();
     nextIndex = 0;
@@ -457,21 +524,15 @@
     if (recorder && recorder.state !== 'inactive') recorder.stop();
     releaseWake();
     startBtn.disabled = false;
-    lensBtn.disabled = false;
     stopBtn.disabled = true;
     recFrame.classList.remove('on');
     dial.classList.remove('rec');
     dial.classList.remove('asleep');
     dialNum.textContent = '--';
     setStatus('ready', note || 'Ready');
-    setTimeout(() => {
-      showSheet();
-      acquireCamera();   // preview back so the phone can be re-aimed
-    }, 400);
+    setTimeout(() => { showSheet(); acquireCamera(); }, 400);
   }
 
-  // Adaptive pacing: one wake a second while idling, tight only when a clip
-  // boundary is close.
   function nextDelay() {
     if (state === 'recording') return 250;
     if (state === 'warming') return 100;
@@ -496,7 +557,7 @@
         setStatus('warming', 'Waking camera…');
         dial.classList.remove('asleep');
         acquireCamera().then(ok => {
-          if (!ok && state === 'warming') state = 'waiting';   // retry next tick
+          if (!ok && state === 'warming') state = 'waiting';
         });
       }
     } else if (state === 'warming') {
@@ -563,14 +624,11 @@
     recFrame.classList.remove('on');
     dial.classList.remove('rec');
 
-    // If STOP was pressed mid-clip we're already idle — leave it that way.
-    if (state !== 'recording') return;
+    if (state !== 'recording') return;   // STOP was pressed mid-clip
 
-    // Power the camera down until shortly before the next clip.
-    if (!keepCameraAwake) releaseCamera();
-
+    releaseCamera();                     // sensor off until just before the next clip
     state = 'waiting';
-    setStatus('waiting', keepCameraAwake ? 'Waiting' : 'Waiting · camera asleep');
+    setStatus('waiting', 'Waiting · camera asleep');
     dial.classList.add('asleep');
     tick();
   }
@@ -584,8 +642,8 @@
     sheet.hidden = false;
   }
 
-  // navigator.share must be called straight from the tap — no awaits before
-  // it, or iOS drops the user-gesture and refuses.
+  // navigator.share must be called straight from the tap — no awaits before it,
+  // or iOS drops the user gesture and refuses.
   saveBtn.addEventListener('click', () => {
     if (!clips.length) return;
     if (navigator.canShare && navigator.canShare({ files: clips })) {
@@ -650,7 +708,7 @@
   function renderTally() {
     if (!clips.length) {
       tallyMain.textContent = 'No clips yet';
-      tallySub.textContent = sourceLabel ? ('Source ' + sourceLabel + ' → 1080×1920') : 'Reels format · 1080×1920 · 30 fps';
+      tallySub.textContent = sourceLabel ? (sourceLabel + ' → 1080×1920') : 'Reels format · 1080×1920 · 30 fps';
       tallySub.className = '';
       return;
     }
@@ -676,8 +734,18 @@
 
   startBtn.addEventListener('click', start);
   stopBtn.addEventListener('click', () => stop());
-  lensBtn.addEventListener('click', cycleLens);
   gateBtn.addEventListener('click', () => { gate.hidden = true; acquireFailures = 0; start(); });
+
+  zoomBar.addEventListener('click', e => {
+    const btn = e.target.closest('button');
+    if (!btn || btn.disabled) return;
+    chooseZoom(parseFloat(btn.getAttribute('data-z')));
+  });
+
+  const savedZoom = parseFloat(safeGet(ZOOM_KEY));
+  const savedPreset = PRESETS.find(p => p.z === savedZoom);
+  if (savedPreset) preset = savedPreset;
+  renderZoomBar();
 
   dialCap.textContent = (CLIP_MS / 1000) + 's clip every ' + (CYCLE_MS / 60000) + ' min';
 
@@ -691,8 +759,8 @@
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
 
-  // Live preview from the moment the app opens, so the phone can be aimed
-  // before starting. The sensor only sleeps between clips once a session runs.
+  // Live preview from the moment the app opens so the phone can be aimed. The
+  // sensor only sleeps between clips once a session is running.
   if (!startBtn.disabled) acquireCamera();
 })();
 </script>
