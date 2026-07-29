@@ -3,7 +3,7 @@
 // CACHE must be bumped on every release. If it isn't, this file's bytes don't
 // change, the browser never treats the worker as updated, and installed phones
 // keep serving whatever is already cached — including a bad build.
-const CACHE = 'video-v8';
+const CACHE = 'video-v10';
 
 const SHELL = [
   './',

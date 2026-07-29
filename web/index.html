@@ -79,6 +79,13 @@
   }
   #focusBtn.on { background: #ffd60a; color: #000; }
   #focusBtn:disabled { opacity: .3; }
+  #micBtn {
+    width: 70px; height: 44px; border: 0; border-radius: 999px;
+    background: rgba(0,0,0,.55); color: #9b9ba1;
+    font-family: inherit; font-size: 13px; font-weight: 800;
+  }
+  #micBtn.on { background: #ff9f0a; color: #000; }
+  #micBtn:disabled { opacity: .3; }
   #zoomBar button {
     width: 54px; height: 54px; border: 0; border-radius: 50%;
     background: rgba(255,255,255,.14); color: #fff;
@@ -169,6 +176,7 @@
   <button data-z="5">5</button>
 </div>
 <button id="focusBtn">AF</button>
+<button id="micBtn">SILENT</button>
 </div>
 
 <div class="ui">
@@ -234,6 +242,7 @@
   const ZOOM_KEY = 'video.zoom';
   const CLIP_KEY = 'video.clipSec';
   const CYCLE_KEY = 'video.cycleSec';
+  const MIC_KEY = 'video.mic';
 
   // On an iPhone 16 Pro Max: .5 is the ultra wide, 1 is the 24mm main camera,
   // 5 is the tetraprism telephoto. 2 has no lens of its own — the stock Camera
@@ -254,7 +263,7 @@
   const tallyMain = $('tallyMain'), tallySub = $('tallySub');
   const startBtn = $('startBtn'), stopBtn = $('stopBtn');
   const zoomBar = $('zoomBar'), focusBtn = $('focusBtn');
-  const clipSel = $('clipSel'), cycleSel = $('cycleSel');
+  const clipSel = $('clipSel'), cycleSel = $('cycleSel'), micBtn = $('micBtn');
   const gate = $('gate'), gateText = $('gateText'), gateBtn = $('gateBtn');
   const sheet = $('sheet'), sheetSummary = $('sheetSummary');
   const saveBtn = $('saveBtn'), laterBtn = $('laterBtn');
@@ -268,27 +277,61 @@
   let sourceLabel = '';
 
   let cams = { ultra: null, wide: null, tele: null };
+  let builtInMic = null;
   let camsLoaded = false;
   let preset = PRESETS[1];        // 1× default
   let activeLensId = '';          // deviceId currently open
   let cropFactor = 1;             // digital zoom applied in the canvas
   let focusLocked = false, focusSupported = true;
+  let micEnabled = true;    // audio on; see audioConstraints() for the routing fix
 
   let canvas = null, canvasCtx = null, canvasStream = null, drawing = false;
 
   // ---- codec --------------------------------------------------------------
 
-  function pickMime() {
-    const options = [
+  // Naming an audio codec in the mime type while the stream carries no audio
+  // track makes MediaRecorder refuse to start, so the list depends on what is
+  // actually being recorded.
+  function pickMime(hasAudio) {
+    const options = hasAudio ? [
       'video/mp4;codecs=avc1.640028,mp4a.40.2',
       'video/mp4;codecs=avc1.42E01E,mp4a.40.2',
       'video/mp4',
       'video/webm;codecs=vp8,opus',
       'video/webm'
+    ] : [
+      'video/mp4;codecs=avc1.640028',
+      'video/mp4;codecs=avc1.42E01E',
+      'video/mp4',
+      'video/webm;codecs=vp8',
+      'video/webm'
     ];
     if (typeof MediaRecorder === 'undefined') return null;
     const found = options.find(t => MediaRecorder.isTypeSupported(t));
     return found === undefined ? '' : found;
+  }
+
+  // ---- audio --------------------------------------------------------------
+
+  // Echo cancellation is the trigger. With it on (the browser default) iOS
+  // captures through the voice-processing audio unit, which puts the audio
+  // session into voice-chat mode — the same mode a phone call uses — and drags
+  // every paired Bluetooth device onto the hands-free profile. That is why the
+  // glasses believe a call is in progress and refuse to record.
+  //
+  // Turning the three processing flags off lets Safari use a plain recording
+  // path instead, and pinning the source to the phone's own microphone means
+  // we never reach for the glasses' mic in the first place.
+  function audioConstraints() {
+    if (!micEnabled) return false;
+    const a = {
+      echoCancellation: { ideal: false },
+      noiseSuppression: { ideal: false },
+      autoGainControl:  { ideal: false }
+    };
+    // `ideal`, not `exact`: if that mic disappears we still get audio.
+    if (builtInMic) a.deviceId = { ideal: builtInMic.deviceId };
+    return a;
   }
 
   // ---- capture ------------------------------------------------------------
@@ -352,8 +395,12 @@
 
     const video = openConstraints(preset);
 
+    // Requesting the microphone is what makes iOS open a record-capable audio
+    // session, which pulls any connected Bluetooth device onto the hands-free
+    // (phone call) profile — that is why smart glasses stop being able to
+    // record while a clip runs. Video-only touches no audio session at all.
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: video, audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ video: video, audio: audioConstraints() });
     } catch (err) {
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: video, audio: false });
@@ -361,7 +408,7 @@
         try {
           // Requested lens unavailable — fall back to whatever the phone gives.
           stream = await navigator.mediaDevices.getUserMedia({
-            video: { facingMode: { ideal: 'environment' } }, audio: true
+            video: { facingMode: { ideal: 'environment' } }, audio: audioConstraints()
           });
         } catch (err3) {
           acquiring = false;
@@ -376,7 +423,7 @@
 
     acquiring = false;
     acquireFailures = 0;
-    mime = pickMime();
+    mime = pickMime(stream.getAudioTracks().length > 0);
 
     const track = stream.getVideoTracks()[0];
     try { activeLensId = (track.getSettings() || {}).deviceId || ''; } catch (e) { activeLensId = ''; }
@@ -460,6 +507,25 @@
     applyFocus();
   }
 
+  // Audio is on by default; audioConstraints() keeps it from hijacking
+  // Bluetooth. SILENT is the guaranteed escape hatch: with no microphone
+  // request at all, iOS opens no audio session and nothing can be commandeered.
+  function renderMic() {
+    micBtn.textContent = micEnabled ? 'MIC' : 'SILENT';
+    micBtn.classList.toggle('on', micEnabled);
+    micBtn.disabled = (state === 'recording' || state === 'warming');
+  }
+
+  function toggleMic() {
+    if (state === 'recording' || state === 'warming') return;
+    micEnabled = !micEnabled;
+    safeSet(MIC_KEY, micEnabled ? '1' : '0');
+    renderMic();
+    // Idle: re-open the stream now so the change is visible immediately.
+    // Mid-session the camera is asleep, so it applies at the next wake.
+    if (state === 'idle' && stream) { releaseCamera(); acquireCamera(); }
+  }
+
   function releaseCamera() {
     stopDrawing();
     if (canvasStream) {
@@ -494,6 +560,12 @@
   function loadCameras() {
     if (camsLoaded || !navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
     navigator.mediaDevices.enumerateDevices().then(devices => {
+      // Prefer the phone's own mic over any Bluetooth headset or glasses.
+      const auds = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
+      builtInMic = auds.find(d => /iphone|ipad|built-?in/i.test(d.label || ''))
+                || auds.find(d => !/bluetooth|headset|airpod|glass|ray-?ban|meta/i.test(d.label || ''))
+                || null;
+
       const vids = devices.filter(d => d.kind === 'videoinput' && d.deviceId);
       if (!vids.length) return;
       camsLoaded = true;
@@ -682,6 +754,7 @@
     state = 'warming';
     stopBtn.disabled = false;
     setDurationMenusEnabled(false);
+    renderMic();
     keepAwake();
     loop();
   }
@@ -696,6 +769,7 @@
     startBtn.disabled = false;
     stopBtn.disabled = true;
     setDurationMenusEnabled(true);
+    renderMic();
     recFrame.classList.remove('on');
     dial.classList.remove('rec');
     dial.classList.remove('asleep');
@@ -745,11 +819,9 @@
     let target;
     try {
       target = recordingStream();
-      recorder = new MediaRecorder(target, {
-        mimeType: mime || undefined,
-        videoBitsPerSecond: VIDEO_BPS,
-        audioBitsPerSecond: AUDIO_BPS
-      });
+      const opts = { mimeType: mime || undefined, videoBitsPerSecond: VIDEO_BPS };
+      if (target.getAudioTracks().length) opts.audioBitsPerSecond = AUDIO_BPS;
+      recorder = new MediaRecorder(target, opts);
     } catch (err) {
       try {
         recorder = new MediaRecorder(target || stream, mime ? { mimeType: mime } : undefined);
@@ -909,6 +981,7 @@
   gateBtn.addEventListener('click', () => { gate.hidden = true; acquireFailures = 0; start(); });
 
   focusBtn.addEventListener('click', toggleFocus);
+  micBtn.addEventListener('click', toggleMic);
 
   zoomBar.addEventListener('click', e => {
     const btn = e.target.closest('button');
@@ -921,6 +994,8 @@
   if (savedPreset) preset = savedPreset;
   renderZoomBar();
   renderFocus();
+  micEnabled = safeGet(MIC_KEY) !== '0';
+  renderMic();
 
   buildDurationMenus();
 
