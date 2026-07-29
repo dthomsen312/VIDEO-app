@@ -79,15 +79,18 @@
   }
   #focusBtn.on { background: #ffd60a; color: #000; }
   #focusBtn:disabled { opacity: .3; }
-  #micBtn {
+  /* Two separate buttons rather than one toggle: the state you want is always
+     one tap away, and which one is lit says what is happening now. */
+  .mic {
     width: 70px; height: 44px; border: 0; border-radius: 999px;
     background: rgba(0,0,0,.55); color: #9b9ba1;
     font-family: inherit; font-size: 13px; font-weight: 800;
   }
-  #micBtn.on { background: #ff9f0a; color: #000; }
-  /* Mic was asked for but the stream came back without it. */
-  #micBtn.warn { background: #ff453a; color: #fff; font-size: 11px; }
-  #micBtn:disabled { opacity: .3; }
+  #micOnBtn.on  { background: #ff9f0a; color: #000; }
+  #micOffBtn.on { background: #fff; color: #000; }
+  /* Mic ON was chosen but the stream came back without a mic track. */
+  #micOnBtn.warn { background: #ff453a; color: #fff; font-size: 11px; }
+  .mic:disabled { opacity: .3; }
   #zoomBar button {
     width: 54px; height: 54px; border: 0; border-radius: 50%;
     background: rgba(255,255,255,.14); color: #fff;
@@ -178,7 +181,8 @@
   <button data-z="5">5</button>
 </div>
 <button id="focusBtn">AF</button>
-<button id="micBtn">SILENT</button>
+<button id="micOnBtn" class="mic">MIC ON</button>
+<button id="micOffBtn" class="mic">MIC OFF</button>
 </div>
 
 <div class="ui">
@@ -265,7 +269,8 @@
   const tallyMain = $('tallyMain'), tallySub = $('tallySub');
   const startBtn = $('startBtn'), stopBtn = $('stopBtn');
   const zoomBar = $('zoomBar'), focusBtn = $('focusBtn');
-  const clipSel = $('clipSel'), cycleSel = $('cycleSel'), micBtn = $('micBtn');
+  const clipSel = $('clipSel'), cycleSel = $('cycleSel');
+  const micOnBtn = $('micOnBtn'), micOffBtn = $('micOffBtn');
   const gate = $('gate'), gateText = $('gateText'), gateBtn = $('gateBtn');
   const sheet = $('sheet'), sheetSummary = $('sheetSummary');
   const saveBtn = $('saveBtn'), laterBtn = $('laterBtn');
@@ -530,17 +535,22 @@
   // the session still runs — without this readout that would show up later as
   // a folder of silent clips.
   function renderMic() {
-    if (!micEnabled) micBtn.textContent = 'SILENT';
-    else micBtn.textContent = (stream && !audioLive) ? 'NO MIC' : 'MIC';
-    micBtn.classList.toggle('on', micEnabled && !(stream && !audioLive));
-    micBtn.classList.toggle('warn', micEnabled && !!stream && !audioLive);
-    micBtn.disabled = (state === 'recording' || state === 'warming');
+    const failed = micEnabled && !!stream && !audioLive;
+    micOnBtn.textContent = failed ? 'NO MIC' : 'MIC ON';
+    micOnBtn.classList.toggle('on', micEnabled && !failed);
+    micOnBtn.classList.toggle('warn', failed);
+    micOffBtn.classList.toggle('on', !micEnabled);
+
+    const locked = (state === 'recording' || state === 'warming');
+    micOnBtn.disabled = locked;
+    micOffBtn.disabled = locked;
   }
 
-  function toggleMic() {
+  function setMic(on) {
     if (state === 'recording' || state === 'warming') return;
-    micEnabled = !micEnabled;
-    safeSet(MIC_KEY, micEnabled ? '1' : '0');
+    if (on === micEnabled) return;
+    micEnabled = on;
+    safeSet(MIC_KEY, on ? '1' : '0');
     renderMic();
     // Idle: re-open the stream now so the change is visible immediately.
     // Mid-session the camera is asleep, so it applies at the next wake.
@@ -1004,7 +1014,8 @@
   gateBtn.addEventListener('click', () => { gate.hidden = true; acquireFailures = 0; start(); });
 
   focusBtn.addEventListener('click', toggleFocus);
-  micBtn.addEventListener('click', toggleMic);
+  micOnBtn.addEventListener('click', () => setMic(true));
+  micOffBtn.addEventListener('click', () => setMic(false));
 
   zoomBar.addEventListener('click', e => {
     const btn = e.target.closest('button');
