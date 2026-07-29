@@ -398,15 +398,12 @@
 
     const video = openConstraints(preset);
 
-    // Requesting the microphone is what makes iOS open a record-capable audio
-    // session, which pulls any connected Bluetooth device onto the hands-free
-    // (phone call) profile — that is why smart glasses stop being able to
-    // record while a clip runs. Video-only touches no audio session at all.
     // Tried in order, most specific first. Audio is attempted twice — once with
-    // the routing constraints, once plain — before it is given up, so a picky
-    // constraint can't be what leaves a session silent. Video-only is the last
-    // resort rather than an early fallback: a mic problem should never be the
-    // reason a painting session records nothing at all.
+    // the routing constraints from audioConstraints(), once plain — before it
+    // is given up, so a constraint Safari dislikes can't be what leaves a
+    // session silent. Video-only is the last resort rather than an early
+    // fallback: a microphone problem should never be the reason a painting
+    // session records nothing at all.
     const generic = { facingMode: { ideal: 'environment' } };
     const attempts = micEnabled ? [
       { video: video,   audio: audioConstraints() },
