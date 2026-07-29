@@ -181,19 +181,13 @@
   // Instagram re-encodes everything down to 1080 wide, so 1080x1920 is the
   // highest resolution that survives. The 9:16 shaping is done here in the
   // canvas, never as a getUserMedia constraint: asking the camera for a
-  // particular aspect ratio makes Safari crop into the sensor, which is
+  // particular size or shape makes Safari crop into the sensor, which is
   // indistinguishable from a zoom you can't undo.
   const TARGET_W  = 1080;
   const TARGET_H  = 1920;
   const TARGET_FPS = 30;
   const VIDEO_BPS = 10000000;
   const AUDIO_BPS = 128000;
-
-  // iPhone sensors are natively 4:3, so capture is requested in that shape
-  // (3:4 in portrait) to get the full field of view with nothing cropped away
-  // at capture time.
-  const SENSOR_RATIO = 3 / 4;
-  const MAX_CAPTURE_H = 3840;   // don't ask for more than 4K
 
   const CLIP_MS  = 10000;
   const CYCLE_MS = 120000;
@@ -203,8 +197,9 @@
 
   // On an iPhone 16 Pro Max: .5 is the ultra wide, 1 is the 24mm main camera,
   // 5 is the tetraprism telephoto. 2 has no lens of its own — the stock Camera
-  // app produces it by cropping the middle of the main sensor, which is what
-  // `digital: 2` does here, capturing at 4K first so the crop stays sharp.
+  // app makes it by cropping the middle of the main sensor, which is what
+  // `digital: 2` does here, raising capture resolution first so the crop lands
+  // on real pixels.
   const PRESETS = [
     { z: 0.5, lens: 'ultra', digital: 1 },
     { z: 1,   lens: 'wide',  digital: 1 },
@@ -256,25 +251,67 @@
 
   // ---- capture ------------------------------------------------------------
 
-  function constraintsFor(p) {
-    // Capture at (digital zoom)x the delivery resolution so cropping in for 2x
-    // samples real pixels instead of upscaling. Width and height are always a
-    // true 3:4 pair — asking for a square or a 9:16 pair is what made Safari
-    // crop the sensor and look permanently zoomed.
-    const h = Math.min(MAX_CAPTURE_H, Math.round(TARGET_H * p.digital));
-    const w = Math.round(h * SENSOR_RATIO);
-
+  // Open constraints name NO resolution. Asking for a size Safari has no
+  // native format for makes it crop a 16:9 sensor read down to fit, and that
+  // crop compounds with the 9:16 canvas crop to about 3.2x apparent zoom —
+  // which is exactly how this ended up far tighter than the stock camera.
+  // Resolution is raised afterwards, along whatever aspect ratio the camera
+  // actually reports, so it can scale instead of crop.
+  function openConstraints(p) {
     const video = {
-      width:  { ideal: w },
-      height: { ideal: h },
-      frameRate: { ideal: TARGET_FPS, max: TARGET_FPS }
+      frameRate: { ideal: TARGET_FPS, max: TARGET_FPS },
+      // Tell the browser not to crop-and-scale to satisfy us, where supported.
+      resizeMode: { ideal: 'none' },
+      advanced: [{ focusMode: 'continuous' }]
     };
-
     const dev = cams[p.lens];
     if (dev) video.deviceId = { exact: dev.deviceId };
     else video.facingMode = { ideal: 'environment' };
-
     return video;
+  }
+
+  // Raise to HD along the camera's own aspect ratio. If the aspect changes we
+  // know it cropped rather than scaled, so the change is rolled back.
+  function raiseResolution(track, digital) {
+    if (!track.getSettings || !track.applyConstraints) return Promise.resolve();
+
+    let s0 = {};
+    try { s0 = track.getSettings() || {}; } catch (e) { return Promise.resolve(); }
+    if (!s0.width || !s0.height) return Promise.resolve();
+
+    const ar = s0.width / s0.height;
+    let capW = 0, capH = 0;
+    try {
+      const caps = track.getCapabilities ? track.getCapabilities() : null;
+      if (caps) { capW = (caps.width && caps.width.max) || 0; capH = (caps.height && caps.height.max) || 0; }
+    } catch (e) {}
+
+    // Long edge target: HD, times the digital zoom so a 2x crop still lands on
+    // real pixels rather than upscaling.
+    let longEdge = TARGET_H * digital;
+    const nativeLong = Math.max(s0.width, s0.height);
+    const capLong = Math.max(capW, capH) || nativeLong;
+    longEdge = Math.min(longEdge, Math.max(capLong, nativeLong));
+    if (longEdge <= nativeLong) return Promise.resolve();
+
+    const w = ar >= 1 ? Math.round(longEdge) : Math.round(longEdge * ar);
+    const h = ar >= 1 ? Math.round(longEdge / ar) : Math.round(longEdge);
+
+    return track.applyConstraints({
+      width: { ideal: w }, height: { ideal: h },
+      frameRate: { ideal: TARGET_FPS, max: TARGET_FPS }
+    }).then(() => {
+      let s1 = {};
+      try { s1 = track.getSettings() || {}; } catch (e) { return; }
+      if (!s1.width || !s1.height) return;
+      // Aspect ratio moved => it cropped. Undo.
+      if (Math.abs((s1.width / s1.height) - ar) > 0.02) {
+        return track.applyConstraints({
+          width: { ideal: s0.width }, height: { ideal: s0.height },
+          frameRate: { ideal: TARGET_FPS, max: TARGET_FPS }
+        }).catch(() => {});
+      }
+    }).catch(() => {});
   }
 
   async function acquireCamera() {
@@ -282,7 +319,7 @@
     if (acquiring) return false;
     acquiring = true;
 
-    const video = constraintsFor(preset);
+    const video = openConstraints(preset);
 
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: video, audio: true });
@@ -313,6 +350,7 @@
     const track = stream.getVideoTracks()[0];
     try { activeLensId = (track.getSettings() || {}).deviceId || ''; } catch (e) { activeLensId = ''; }
 
+    await raiseResolution(track, preset.digital);
     applyZoom();
     preview.srcObject = stream;
     const play = preview.play();
