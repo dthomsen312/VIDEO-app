@@ -527,13 +527,13 @@
   }
 
   // Audio is on by default; audioConstraints() keeps it from hijacking
-  // Bluetooth. SILENT is the guaranteed escape hatch: with no microphone
+  // Bluetooth. MIC OFF is the guaranteed escape hatch: with no microphone
   // request at all, iOS opens no audio session and nothing can be commandeered.
   //
-  // The button reports what the stream actually carries, not what was asked
-  // for. If the mic request fails, acquireCamera falls back to video-only so
-  // the session still runs — without this readout that would show up later as
-  // a folder of silent clips.
+  // MIC ON reports what the stream actually carries, not what was asked for.
+  // If the mic request fails, acquireCamera falls back to video-only so the
+  // session still runs — without this readout that would show up later as a
+  // folder of silent clips.
   function renderMic() {
     const failed = micEnabled && !!stream && !audioLive;
     micOnBtn.textContent = failed ? 'NO MIC' : 'MIC ON';
