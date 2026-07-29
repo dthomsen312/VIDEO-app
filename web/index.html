@@ -22,18 +22,16 @@
     -webkit-user-select: none; user-select: none;
   }
 
-  /* The stage is exactly 9:16 — the shape that gets recorded. Digital zoom is
-     a transform on the video inside it, so the preview always shows the same
-     framing the file will get. */
+  /* Full screen, and `contain` so the ENTIRE recorded frame is visible with
+     nothing cropped off the edges by the preview. What you see is exactly what
+     is encoded, since clips are now recorded from the camera track untouched. */
   #stage {
-    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-    width: 100%; max-width: 100%; max-height: 100%;
-    aspect-ratio: 9 / 16;
+    position: fixed; inset: 0;
     overflow: hidden; background: #000;
   }
   #preview {
     display: block; width: 100%; height: 100%;
-    object-fit: cover; transform-origin: center center;
+    object-fit: contain; transform-origin: center center;
   }
 
   #recFrame {
@@ -65,12 +63,22 @@
   .dot.rec { background: #ff3b30; }
 
   /* Zoom selector, top right, mirroring the stock Camera app's steps. */
-  #zoomBar {
+  #rightBar {
     position: fixed; z-index: 6;
     top: calc(env(safe-area-inset-top) + 10px); right: 14px;
+    display: flex; flex-direction: column; align-items: center; gap: 10px;
+  }
+  #zoomBar {
     display: flex; flex-direction: column; gap: 8px;
     background: rgba(0,0,0,.5); border-radius: 999px; padding: 8px;
   }
+  #focusBtn {
+    width: 70px; height: 44px; border: 0; border-radius: 999px;
+    background: rgba(0,0,0,.55); color: #fff;
+    font-family: inherit; font-size: 14px; font-weight: 800;
+  }
+  #focusBtn.on { background: #ffd60a; color: #000; }
+  #focusBtn:disabled { opacity: .3; }
   #zoomBar button {
     width: 54px; height: 54px; border: 0; border-radius: 50%;
     background: rgba(255,255,255,.14); color: #fff;
@@ -136,11 +144,14 @@
 <div id="stage"><video id="preview" playsinline autoplay muted></video></div>
 <div id="recFrame"></div>
 
+<div id="rightBar">
 <div id="zoomBar">
   <button data-z="0.5">.5</button>
   <button data-z="1" class="on">1×</button>
   <button data-z="2">2</button>
   <button data-z="5">5</button>
+</div>
+<button id="focusBtn">AF</button>
 </div>
 
 <div class="ui">
@@ -148,7 +159,7 @@
   <div class="spacer"></div>
   <div class="dial" id="dial"><b id="dialNum">--</b><span id="dialCap">10s clip every 2 min</span></div>
   <div class="spacer"></div>
-  <div class="tally"><span id="tallyMain">No clips yet</span><em id="tallySub">Reels format · 1080×1920 · 30 fps</em></div>
+  <div class="tally"><span id="tallyMain">No clips yet</span><em id="tallySub">HD · 30 fps</em></div>
   <div class="controls">
     <button class="big start" id="startBtn">
       <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>START
@@ -177,12 +188,11 @@
 (() => {
   'use strict';
 
-  // ---- Instagram Reels target --------------------------------------------
-  // Instagram re-encodes everything down to 1080 wide, so 1080x1920 is the
-  // highest resolution that survives. The 9:16 shaping is done here in the
-  // canvas, never as a getUserMedia constraint: asking the camera for a
-  // particular size or shape makes Safari crop into the sensor, which is
-  // indistinguishable from a zoom you can't undo.
+  // ---- Output ------------------------------------------------------------
+  // At 1x the camera track is recorded exactly as it comes: native resolution,
+  // native aspect ratio, no crop, no rescale, nothing warped. Instagram accepts
+  // that and re-encodes to 1080 wide anyway. TARGET_W/H are only used for the
+  // 2x canvas crop, which is the one case that has to redraw.
   const TARGET_W  = 1080;
   const TARGET_H  = 1920;
   const TARGET_FPS = 30;
@@ -213,7 +223,7 @@
   const dialNum = $('dialNum'), dialCap = $('dialCap');
   const tallyMain = $('tallyMain'), tallySub = $('tallySub');
   const startBtn = $('startBtn'), stopBtn = $('stopBtn');
-  const zoomBar = $('zoomBar');
+  const zoomBar = $('zoomBar'), focusBtn = $('focusBtn');
   const gate = $('gate'), gateText = $('gateText'), gateBtn = $('gateBtn');
   const sheet = $('sheet'), sheetSummary = $('sheetSummary');
   const saveBtn = $('saveBtn'), laterBtn = $('laterBtn');
@@ -231,6 +241,7 @@
   let preset = PRESETS[1];        // 1× default
   let activeLensId = '';          // deviceId currently open
   let cropFactor = 1;             // digital zoom applied in the canvas
+  let focusLocked = false, focusSupported = true;
 
   let canvas = null, canvasCtx = null, canvasStream = null, drawing = false;
 
@@ -251,16 +262,16 @@
 
   // ---- capture ------------------------------------------------------------
 
-  // Open constraints name NO resolution. Asking for a size Safari has no
-  // native format for makes it crop a 16:9 sensor read down to fit, and that
-  // crop compounds with the 9:16 canvas crop to about 3.2x apparent zoom —
-  // which is exactly how this ended up far tighter than the stock camera.
-  // Resolution is raised afterwards, along whatever aspect ratio the camera
-  // actually reports, so it can scale instead of crop.
+  // 1920x1080 is one of iOS Safari's own native capture formats, so asking for
+  // it gets HD directly without the sensor being cropped to fit. Asking for a
+  // NON-native shape (a square, or 3:4) is what previously made Safari crop in
+  // and look zoomed. Asking for nothing at all was worse: Safari then defaults
+  // to 640x480, which is where the blur came from.
   function openConstraints(p) {
     const video = {
+      width:  { ideal: 1920 },
+      height: { ideal: 1080 },
       frameRate: { ideal: TARGET_FPS, max: TARGET_FPS },
-      // Tell the browser not to crop-and-scale to satisfy us, where supported.
       resizeMode: { ideal: 'none' },
       advanced: [{ focusMode: 'continuous' }]
     };
@@ -270,9 +281,11 @@
     return video;
   }
 
-  // Raise to HD along the camera's own aspect ratio. If the aspect changes we
-  // know it cropped rather than scaled, so the change is rolled back.
+  // Only needed when a digital crop is coming: capture higher so the crop
+  // lands on real pixels. Never gated on getCapabilities — Safari often omits
+  // it, and gating on it is what silently left capture at 640x480.
   function raiseResolution(track, digital) {
+    if (digital <= 1) return Promise.resolve();
     if (!track.getSettings || !track.applyConstraints) return Promise.resolve();
 
     let s0 = {};
@@ -280,20 +293,7 @@
     if (!s0.width || !s0.height) return Promise.resolve();
 
     const ar = s0.width / s0.height;
-    let capW = 0, capH = 0;
-    try {
-      const caps = track.getCapabilities ? track.getCapabilities() : null;
-      if (caps) { capW = (caps.width && caps.width.max) || 0; capH = (caps.height && caps.height.max) || 0; }
-    } catch (e) {}
-
-    // Long edge target: HD, times the digital zoom so a 2x crop still lands on
-    // real pixels rather than upscaling.
-    let longEdge = TARGET_H * digital;
-    const nativeLong = Math.max(s0.width, s0.height);
-    const capLong = Math.max(capW, capH) || nativeLong;
-    longEdge = Math.min(longEdge, Math.max(capLong, nativeLong));
-    if (longEdge <= nativeLong) return Promise.resolve();
-
+    const longEdge = Math.min(3840, Math.max(s0.width, s0.height) * digital);
     const w = ar >= 1 ? Math.round(longEdge) : Math.round(longEdge * ar);
     const h = ar >= 1 ? Math.round(longEdge / ar) : Math.round(longEdge);
 
@@ -304,7 +304,7 @@
       let s1 = {};
       try { s1 = track.getSettings() || {}; } catch (e) { return; }
       if (!s1.width || !s1.height) return;
-      // Aspect ratio moved => it cropped. Undo.
+      // Aspect ratio moved => it cropped rather than scaled. Undo.
       if (Math.abs((s1.width / s1.height) - ar) > 0.02) {
         return track.applyConstraints({
           width: { ideal: s0.width }, height: { ideal: s0.height },
@@ -351,6 +351,7 @@
     try { activeLensId = (track.getSettings() || {}).deviceId || ''; } catch (e) { activeLensId = ''; }
 
     await raiseResolution(track, preset.digital);
+    applyFocus();
     applyZoom();
     preview.srcObject = stream;
     const play = preview.play();
@@ -390,6 +391,44 @@
     preview.style.transform = cropFactor === 1 ? '' : 'scale(' + cropFactor + ')';
   }
 
+  // Continuous autofocus by default. Locking pins focus where it is, so a hand
+  // passing in front of the easel can't make the camera hunt mid-clip.
+  function applyFocus() {
+    const track = stream && stream.getVideoTracks()[0];
+    if (!track || !track.applyConstraints) return;
+
+    const modes = focusLocked ? ['manual', 'single-shot'] : ['continuous'];
+
+    const attempt = i => {
+      if (i >= modes.length) { markFocusUnsupported(); return; }
+      track.applyConstraints({ advanced: [{ focusMode: modes[i] }] })
+        .then(() => { focusSupported = true; renderFocus(); })
+        .catch(() => attempt(i + 1));
+    };
+    attempt(0);
+  }
+
+  function markFocusUnsupported() {
+    // Safari may not expose focusMode at all; it still autofocuses on its own.
+    focusSupported = false;
+    focusLocked = false;
+    renderFocus();
+  }
+
+  function renderFocus() {
+    focusBtn.textContent = focusLocked ? 'AF-L' : 'AF';
+    focusBtn.classList.toggle('on', focusLocked);
+    focusBtn.disabled = !focusSupported;
+    focusBtn.title = focusSupported ? '' : 'Focus control not available in this browser';
+  }
+
+  function toggleFocus() {
+    if (!focusSupported) return;
+    focusLocked = !focusLocked;
+    renderFocus();
+    applyFocus();
+  }
+
   function releaseCamera() {
     stopDrawing();
     if (canvasStream) {
@@ -412,7 +451,7 @@
     if (!s.width || !s.height) return;
     sourceLabel = s.width + '×' + s.height + ' · ' + zoomText(preset.z);
     if (cropFactor > 1) sourceLabel += ' crop';
-    if (!clips.length) tallySub.textContent = sourceLabel + ' → 1080×1920';
+    if (!clips.length) tallySub.textContent = sourceLabel + (cropFactor > 1 ? ' → 1080×1920' : ' · recorded as-is');
   }
 
   const zoomText = z => (z === 1 ? '1×' : (z + '×'));
@@ -476,20 +515,14 @@
   function safeGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
   function safeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 
-  // ---- 9:16 shaping -------------------------------------------------------
+  // ---- shaping ------------------------------------------------------------
 
   function recordingStream() {
-    const track = stream.getVideoTracks()[0];
-    let s = {};
-    try { s = track.getSettings ? (track.getSettings() || {}) : {}; } catch (e) {}
-    const w = s.width, h = s.height;
-
-    // Straight through only when the camera already matches the target exactly
-    // and no digital crop is wanted.
-    if (cropFactor === 1 && w && h && h > w &&
-        Math.abs((w / h) - (TARGET_W / TARGET_H)) < 0.02) {
-      return stream;
-    }
+    // No digital zoom => hand MediaRecorder the camera's own track untouched.
+    // No canvas redraw, no rescale, no crop: whatever the sensor gives is what
+    // gets encoded, at full sharpness and with nothing distorted. Routing every
+    // clip through the canvas is what softened the footage.
+    if (cropFactor === 1) return stream;
 
     if (!canvas) {
       canvas = document.createElement('canvas');
@@ -523,9 +556,6 @@
 
       const vw = preview.videoWidth, vh = preview.videoHeight;
       if (!vw || !vh) return;
-      // Cover the 1080x1920 frame, then apply digital zoom about the centre.
-      // At 1x with a 3:4 source this keeps the full vertical field of view and
-      // trims only the sides — no magnification at all.
       const scale = Math.max(TARGET_W / vw, TARGET_H / vh) * cropFactor;
       const dw = vw * scale, dh = vh * scale;
       canvasCtx.drawImage(preview, (TARGET_W - dw) / 2, (TARGET_H - dh) / 2, dw, dh);
@@ -746,7 +776,7 @@
   function renderTally() {
     if (!clips.length) {
       tallyMain.textContent = 'No clips yet';
-      tallySub.textContent = sourceLabel ? (sourceLabel + ' → 1080×1920') : 'Reels format · 1080×1920 · 30 fps';
+      tallySub.textContent = sourceLabel || 'HD · 30 fps';
       tallySub.className = '';
       return;
     }
@@ -774,6 +804,8 @@
   stopBtn.addEventListener('click', () => stop());
   gateBtn.addEventListener('click', () => { gate.hidden = true; acquireFailures = 0; start(); });
 
+  focusBtn.addEventListener('click', toggleFocus);
+
   zoomBar.addEventListener('click', e => {
     const btn = e.target.closest('button');
     if (!btn || btn.disabled) return;
@@ -784,6 +816,7 @@
   const savedPreset = PRESETS.find(p => p.z === savedZoom);
   if (savedPreset) preset = savedPreset;
   renderZoomBar();
+  renderFocus();
 
   dialCap.textContent = (CLIP_MS / 1000) + 's clip every ' + (CYCLE_MS / 60000) + ' min';
 
