@@ -103,6 +103,23 @@
   .dial.rec b { color: #ff3b30; }
   .dial span { font-size: 17px; font-weight: 600; opacity: .85; }
 
+  .settings {
+    display: flex; gap: 10px; width: 100%; margin-bottom: 10px;
+  }
+  .settings label {
+    flex: 1; display: flex; flex-direction: column; gap: 4px;
+    background: rgba(0,0,0,.5); border-radius: 18px; padding: 8px 12px;
+    font-size: 12px; font-weight: 600; color: rgba(255,255,255,.65);
+    text-transform: uppercase; letter-spacing: .4px;
+  }
+  .settings select {
+    -webkit-appearance: none; appearance: none;
+    border: 0; background: transparent; color: #fff;
+    font-family: inherit; font-size: 19px; font-weight: 800;
+    padding: 0; width: 100%;
+  }
+  .settings label:has(select:disabled) { opacity: .4; }
+
   .tally {
     background: rgba(0,0,0,.5); border-radius: 18px;
     padding: 10px 16px; margin-bottom: 12px; width: 100%;
@@ -159,6 +176,10 @@
   <div class="spacer"></div>
   <div class="dial" id="dial"><b id="dialNum">--</b><span id="dialCap">10s clip every 2 min</span></div>
   <div class="spacer"></div>
+  <div class="settings">
+    <label>Clip length<select id="clipSel"></select></label>
+    <label>Every<select id="cycleSel"></select></label>
+  </div>
   <div class="tally"><span id="tallyMain">No clips yet</span><em id="tallySub">HD · 30 fps</em></div>
   <div class="controls">
     <button class="big start" id="startBtn">
@@ -199,11 +220,20 @@
   const VIDEO_BPS = 10000000;
   const AUDIO_BPS = 128000;
 
-  const CLIP_MS  = 10000;
-  const CYCLE_MS = 120000;
   const WARMUP_MS = 3000;
 
+  // Selectable clip length and spacing. An interval must leave room for the
+  // clip plus the camera warm-up, so shorter options get disabled as the clip
+  // length grows rather than silently producing back-to-back recordings.
+  const CLIP_CHOICES  = [3, 5, 10, 15, 20, 30, 45, 60];
+  const CYCLE_CHOICES = [15, 30, 60, 120, 180, 300, 600, 900, 1800, 3600];
+
+  let clipMs  = 10000;
+  let cycleMs = 120000;
+
   const ZOOM_KEY = 'video.zoom';
+  const CLIP_KEY = 'video.clipSec';
+  const CYCLE_KEY = 'video.cycleSec';
 
   // On an iPhone 16 Pro Max: .5 is the ultra wide, 1 is the 24mm main camera,
   // 5 is the tetraprism telephoto. 2 has no lens of its own — the stock Camera
@@ -224,6 +254,7 @@
   const tallyMain = $('tallyMain'), tallySub = $('tallySub');
   const startBtn = $('startBtn'), stopBtn = $('stopBtn');
   const zoomBar = $('zoomBar'), focusBtn = $('focusBtn');
+  const clipSel = $('clipSel'), cycleSel = $('cycleSel');
   const gate = $('gate'), gateText = $('gateText'), gateBtn = $('gateBtn');
   const sheet = $('sheet'), sheetSummary = $('sheetSummary');
   const saveBtn = $('saveBtn'), laterBtn = $('laterBtn');
@@ -515,6 +546,76 @@
   function safeGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
   function safeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 
+  // ---- clip length / interval ---------------------------------------------
+
+  const durationLabel = sec => {
+    if (sec < 60) return sec + ' sec';
+    const m = sec / 60;
+    return (m % 1 === 0 ? m : m.toFixed(1)) + (m === 1 ? ' min' : ' min');
+  };
+
+  function buildDurationMenus() {
+    CLIP_CHOICES.forEach(sec => {
+      const o = document.createElement('option');
+      o.value = String(sec); o.textContent = durationLabel(sec);
+      clipSel.appendChild(o);
+    });
+    CYCLE_CHOICES.forEach(sec => {
+      const o = document.createElement('option');
+      o.value = String(sec); o.textContent = durationLabel(sec);
+      cycleSel.appendChild(o);
+    });
+
+    const savedClip = parseInt(safeGet(CLIP_KEY), 10);
+    const savedCycle = parseInt(safeGet(CYCLE_KEY), 10);
+    if (CLIP_CHOICES.indexOf(savedClip) !== -1) clipMs = savedClip * 1000;
+    if (CYCLE_CHOICES.indexOf(savedCycle) !== -1) cycleMs = savedCycle * 1000;
+
+    clipSel.value = String(clipMs / 1000);
+    cycleSel.value = String(cycleMs / 1000);
+    syncDurationMenus();
+
+    clipSel.addEventListener('change', () => {
+      clipMs = parseInt(clipSel.value, 10) * 1000;
+      safeSet(CLIP_KEY, clipSel.value);
+      syncDurationMenus();
+    });
+    cycleSel.addEventListener('change', () => {
+      cycleMs = parseInt(cycleSel.value, 10) * 1000;
+      safeSet(CYCLE_KEY, cycleSel.value);
+      syncDurationMenus();
+    });
+  }
+
+  // Grey out any interval that can't fit the clip plus warm-up, and pull the
+  // current selection up to the shortest legal one if it no longer fits.
+  function syncDurationMenus() {
+    const minCycle = (clipMs + WARMUP_MS) / 1000;
+    let firstLegal = null;
+
+    Array.prototype.forEach.call(cycleSel.options, o => {
+      const sec = parseInt(o.value, 10);
+      o.disabled = sec < minCycle;
+      if (!o.disabled && firstLegal === null) firstLegal = sec;
+    });
+
+    if (cycleMs / 1000 < minCycle && firstLegal !== null) {
+      cycleMs = firstLegal * 1000;
+      cycleSel.value = String(firstLegal);
+      safeSet(CYCLE_KEY, cycleSel.value);
+    }
+    renderSchedule();
+  }
+
+  function renderSchedule() {
+    dialCap.textContent = durationLabel(clipMs / 1000) + ' clip every ' + durationLabel(cycleMs / 1000);
+  }
+
+  function setDurationMenusEnabled(on) {
+    clipSel.disabled = !on;
+    cycleSel.disabled = !on;
+  }
+
   // ---- shaping ------------------------------------------------------------
 
   function recordingStream() {
@@ -574,12 +675,13 @@
 
     setStatus('warming', 'Waking camera…');
     const ok = await acquireCamera();
-    if (!ok) { startBtn.disabled = false; setStatus('ready', 'Ready'); return; }
+    if (!ok) { startBtn.disabled = false; setDurationMenusEnabled(true); setStatus('ready', 'Ready'); return; }
 
     anchor = Date.now();
     nextIndex = 0;
     state = 'warming';
     stopBtn.disabled = false;
+    setDurationMenusEnabled(false);
     keepAwake();
     loop();
   }
@@ -593,6 +695,7 @@
     releaseWake();
     startBtn.disabled = false;
     stopBtn.disabled = true;
+    setDurationMenusEnabled(true);
     recFrame.classList.remove('on');
     dial.classList.remove('rec');
     dial.classList.remove('asleep');
@@ -604,7 +707,7 @@
   function nextDelay() {
     if (state === 'recording') return 250;
     if (state === 'warming') return 100;
-    const untilWake = (anchor + nextIndex * CYCLE_MS - WARMUP_MS) - Date.now();
+    const untilWake = (anchor + nextIndex * cycleMs - WARMUP_MS) - Date.now();
     if (untilWake > 5000) return 1000;
     return 200;
   }
@@ -616,7 +719,7 @@
 
   function tick() {
     const now = Date.now();
-    const due = anchor + nextIndex * CYCLE_MS;
+    const due = anchor + nextIndex * cycleMs;
 
     if (state === 'waiting') {
       setDial(Math.ceil((due - now) / 1000), 'until next clip');
@@ -664,16 +767,16 @@
 
     state = 'recording';
     clipStartedAt = Date.now();
-    clipEnd = clipStartedAt + CLIP_MS;
+    clipEnd = clipStartedAt + clipMs;
     nextIndex++;
     setStatus('rec', 'Recording');
     recFrame.classList.add('on');
     dial.classList.add('rec');
-    setDial(CLIP_MS / 1000, 'seconds left in clip');
+    setDial(clipMs / 1000, 'seconds left in clip');
 
     clipTimer = setTimeout(() => {
       if (recorder && recorder.state === 'recording') recorder.stop();
-    }, CLIP_MS);
+    }, clipMs);
   }
 
   function clipStopped() {
@@ -781,7 +884,8 @@
       return;
     }
     tallyMain.textContent = clips.length + ' clip' + (clips.length === 1 ? '' : 's') + ' · ' + mb(totalBytes) + ' MB';
-    if (clips.length >= 40) {
+    // Size, not clip count: at 1-minute clips this fills up far faster.
+    if (totalBytes > 1500000000 || clips.length >= 60) {
       tallySub.textContent = 'Getting large — stop and save soon so nothing is lost';
       tallySub.className = 'warn';
     } else {
@@ -818,7 +922,7 @@
   renderZoomBar();
   renderFocus();
 
-  dialCap.textContent = (CLIP_MS / 1000) + 's clip every ' + (CYCLE_MS / 60000) + ' min';
+  buildDurationMenus();
 
   if (typeof MediaRecorder === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     showGate('This browser can’t record video. Open VIDEO in Safari on iOS 15 or later.');

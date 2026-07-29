@@ -101,16 +101,23 @@ largest single draw. Keep the phone plugged in for anything long.
 
 ## Changing the timing
 
-Both numbers live at the top of `HandsFreeRecorder/RecordingController.swift`:
+In the web app, two dropdowns on the main screen set **clip length** (3 sec to
+1 min) and **interval** (15 sec to 60 min). Both persist between launches and
+lock while a session is running.
+
+The interval is measured start-of-clip to start-of-clip, so 10 sec / 2 min
+means a 10-second clip followed by 110 seconds of idle. Intervals too short to
+fit the clip plus the 3-second camera warm-up are greyed out. Clip times come
+off a fixed anchor taken when you tap START, so they don't drift over a long
+session.
+
+In the native app the same two numbers are constants at the top of
+`HandsFreeRecorder/RecordingController.swift`:
 
 ```swift
 static let clipDuration: TimeInterval = 10   // length of each clip
 static let cycleInterval: TimeInterval = 120 // start-to-start gap
 ```
-
-`cycleInterval` is measured start-of-clip to start-of-clip, so 10 / 120 means a
-10-second clip followed by 110 seconds of idle. Clip times are computed off a
-fixed anchor taken when you tap Start, so they don't drift over a long session.
 
 ## Known limits
 
